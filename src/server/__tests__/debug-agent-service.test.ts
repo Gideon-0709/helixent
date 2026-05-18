@@ -1,8 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
 
+import { z } from "zod";
+
 import { Agent } from "@/agent";
-import { Model, type AssistantMessage, type ModelProvider, type ModelProviderInvokeParams } from "@/foundation";
+import type { AgentType } from "@/coding/agents/agent-profiles";
+import { defineTool, Model, type AssistantMessage, type ModelProvider, type ModelProviderInvokeParams } from "@/foundation";
 
 import { createDebugAgentService } from "../debug-agent-service";
 import { createDebugResourceStore } from "../debug-resource-store";
@@ -113,6 +116,52 @@ describe("createDebugAgentService", () => {
     sessionsResponse = await service.fetch(new Request("http://localhost/api/internal/sessions"));
     sessions = (await sessionsResponse.json()) as Array<{ id: string; runCount: number }>;
     expect(sessions.find((session) => session.id === sessionId)?.runCount).toBe(1);
+  });
+
+  test("uses the agent name as the auto-created session title", async () => {
+    const service = createDebugAgentService({
+      createAgent: async () =>
+        new Agent({
+          name: "GMA",
+          model: new Model("test-model", new FinalAnswerProvider()),
+          prompt: "test prompt",
+        }),
+    });
+
+    const runId = await startRun(service, undefined, "summarize revenue");
+    await waitFor(() => service.traceStore.getEvents(runId).some((event) => event.type === "run_completed"));
+
+    const sessionsResponse = await service.fetch(new Request("http://localhost/api/internal/sessions"));
+    const sessions = (await sessionsResponse.json()) as Array<{ title: string }>;
+    expect(sessions[0]?.title).toBe("GMA");
+  });
+
+  test("creates runs with the requested agent type", async () => {
+    const createdTypes: AgentType[] = [];
+    const service = createDebugAgentService({
+      createAgent: async (agentType = "gma") => {
+        createdTypes.push(agentType);
+        return new Agent({
+          name: agentType.toUpperCase(),
+          model: new Model("test-model", new FinalAnswerProvider()),
+          prompt: "test prompt",
+        });
+      },
+    });
+
+    const response = await service.fetch(
+      new Request("http://localhost/api/agent/runs", {
+        method: "POST",
+        body: JSON.stringify({ message: "inspect stores", agentType: "rm" }),
+      }),
+    );
+    const { runId } = (await response.json()) as { runId: string };
+    await waitFor(() => service.traceStore.getEvents(runId).some((event) => event.type === "run_completed"));
+
+    const sessionsResponse = await service.fetch(new Request("http://localhost/api/internal/sessions"));
+    const sessions = (await sessionsResponse.json()) as Array<{ title: string; agentType: AgentType }>;
+    expect(createdTypes).toEqual(["rm"]);
+    expect(sessions[0]).toMatchObject({ title: "RM", agentType: "rm" });
   });
 
   test("deletes a debug session and releases its trace events", async () => {
@@ -274,6 +323,120 @@ describe("createDebugAgentService", () => {
     expect(await Bun.file(archivePath).exists()).toBe(false);
   });
 
+  test("starts a workflow run and records workflow trace events", async () => {
+    const cwd = await createFixtureProject();
+    await Bun.write(
+      join(cwd, "workflows/echo.workflow.yaml"),
+      "id: echo\nname: Echo\nversion: 1\nsteps:\n  - id: echo_step\n    type: tool\n    tool: echo\n    input:\n      value: $input.value\n",
+    );
+    const echoTool = defineTool({
+      name: "echo",
+      description: "Echo a value",
+      parameters: z.object({ value: z.string() }),
+      invoke: async (input) => ({ echoed: input.value }),
+    });
+    const service = createDebugAgentService({
+      resourceStore: createDebugResourceStore({ cwd }),
+      workflowTools: [echoTool],
+    });
+
+    const response = await service.fetch(
+      new Request("http://localhost/api/workflows/runs", {
+        method: "POST",
+        body: JSON.stringify({ workflowId: "echo", input: { value: "hello" } }),
+      }),
+    );
+    const payload = (await response.json()) as { workflowRunId: string; status: string };
+
+    expect(response.status).toBe(200);
+    expect(payload).toMatchObject({ status: "running" });
+    expect(payload.workflowRunId).toStartWith("workflow_run_");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(service.traceStore.getEvents(payload.workflowRunId).map((event) => event.type)).toEqual([
+      "workflow_started",
+      "workflow_step_started",
+      "workflow_step_completed",
+      "workflow_completed",
+    ]);
+  });
+
+  test("associates workflow runs with the selected debug session", async () => {
+    const cwd = await createFixtureProject();
+    await Bun.write(
+      join(cwd, "workflows/echo.workflow.yaml"),
+      "id: echo\nname: Echo\nversion: 1\nsteps:\n  - id: echo_step\n    type: tool\n    tool: echo\n    input:\n      value: $input.value\n",
+    );
+    const echoTool = defineTool({
+      name: "echo",
+      description: "Echo a value",
+      parameters: z.object({ value: z.string() }),
+      invoke: async (input) => ({ echoed: input.value }),
+    });
+    const service = createDebugAgentService({
+      resourceStore: createDebugResourceStore({ cwd }),
+      workflowTools: [echoTool],
+    });
+    const sessionResponse = await service.fetch(
+      new Request("http://localhost/api/internal/sessions", {
+        method: "POST",
+        body: JSON.stringify({ agentType: "gma" }),
+      }),
+    );
+    const sessionPayload = (await sessionResponse.json()) as { sessionId: string };
+
+    const response = await service.fetch(
+      new Request("http://localhost/api/workflows/runs", {
+        method: "POST",
+        body: JSON.stringify({ sessionId: sessionPayload.sessionId, workflowId: "echo", input: { value: "hello" } }),
+      }),
+    );
+    const payload = (await response.json()) as { workflowRunId: string };
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(response.status).toBe(200);
+    expect(service.traceStore.listRuns()[0]).toMatchObject({
+      runId: payload.workflowRunId,
+      sessionId: sessionPayload.sessionId,
+    });
+  });
+
+  test("runs workflow agent steps on the selected session agent", async () => {
+    const cwd = await createFixtureProject();
+    await Bun.write(
+      join(cwd, "workflows/session-agent.workflow.yaml"),
+      "id: session-agent\nname: Session Agent\nversion: 1\nsteps:\n  - id: ask_agent\n    type: agent\n    message: workflow question\n",
+    );
+    const service = createDebugAgentService({
+      createAgent: async () =>
+        new Agent({
+          model: new Model("test-model", new UserCountProvider()),
+          prompt: "test prompt",
+        }),
+      resourceStore: createDebugResourceStore({ cwd }),
+    });
+    const sessionId = await createSession(service, "Workflow memory");
+    const firstRunId = await startRun(service, sessionId, "first");
+    await waitFor(() => service.traceStore.getEvents(firstRunId).some((event) => event.type === "final_answer"));
+
+    const response = await service.fetch(
+      new Request("http://localhost/api/workflows/runs", {
+        method: "POST",
+        body: JSON.stringify({ sessionId, workflowId: "session-agent" }),
+      }),
+    );
+    const payload = (await response.json()) as { workflowRunId: string };
+    await waitFor(() => service.traceStore.getEvents(payload.workflowRunId).some((event) => event.type === "workflow_completed"));
+    const secondRunId = await startRun(service, sessionId, "after workflow");
+    await waitFor(() => service.traceStore.getEvents(secondRunId).some((event) => event.type === "final_answer"));
+
+    const workflowStep = service.traceStore
+      .getEvents(payload.workflowRunId)
+      .find((event) => event.type === "workflow_step_completed" && event.stepType === "agent");
+    expect(workflowStep).toMatchObject({ result: "users:2" });
+    expect(finalAnswerText(service.traceStore.getEvents(secondRunId))).toBe("users:3");
+  });
+
   test("continues conversation context for runs in the same session", async () => {
     let createAgentCount = 0;
     const service = createDebugAgentService({
@@ -376,7 +539,7 @@ async function createSession(service: ReturnType<typeof createDebugAgentService>
   return payload.sessionId;
 }
 
-async function startRun(service: ReturnType<typeof createDebugAgentService>, sessionId: string, message: string): Promise<string> {
+async function startRun(service: ReturnType<typeof createDebugAgentService>, sessionId: string | undefined, message: string): Promise<string> {
   const response = await service.fetch(
     new Request("http://localhost/api/agent/runs", {
       method: "POST",

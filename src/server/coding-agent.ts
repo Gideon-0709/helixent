@@ -2,7 +2,7 @@ import { join } from "node:path";
 
 import type { ModelEntry } from "@/cli/config";
 import { loadConfig, ensureHelixentHomeEnv } from "@/cli/config";
-import { createCodingAgent } from "@/coding";
+import { createRoleAgent, type AgentType } from "@/coding";
 import { AnthropicModelProvider } from "@/community/anthropic";
 import { OpenAIModelProvider } from "@/community/openai";
 import type { ModelProvider } from "@/foundation";
@@ -10,7 +10,7 @@ import { Model } from "@/foundation";
 
 import { createDebugResourceStore } from "./debug-resource-store";
 
-export async function createDefaultDebugCodingAgent() {
+export async function createDefaultDebugAgent(agentType: AgentType = "gma") {
   ensureHelixentHomeEnv();
   const cwd = process.cwd();
   const entry = resolveDebugModelEntry();
@@ -36,7 +36,8 @@ export async function createDefaultDebugCodingAgent() {
     },
   });
 
-  return createCodingAgent({
+  return createRoleAgent({
+    agentType,
     model,
     cwd,
     prompt: await resourceStore.getActivePromptContent(),
@@ -50,6 +51,8 @@ export async function createDefaultDebugCodingAgent() {
     askUser: async () => "deny",
   });
 }
+
+export const createDefaultDebugGmaAgent = createDefaultDebugAgent;
 
 export function resolveDebugModelEntry(): ModelEntry {
   const deepSeekApiKey = process.env.DEEPSEEK_API_KEY?.trim();

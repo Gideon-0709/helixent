@@ -5,12 +5,27 @@ import {
   InMemoryTraceStore,
   type Agent,
   type AgentEvent,
+  readWorkflowFile,
   type TraceEvent,
   type TraceEventInput,
   type TraceStore,
+  runWorkflow,
 } from "@/agent";
+import { AGENT_PROFILES, isAgentType, type AgentType } from "@/coding";
+import { applyPatchTool } from "@/coding/tools/apply-patch";
+import { bashTool } from "@/coding/tools/bash";
+import { fileInfoTool } from "@/coding/tools/file-info";
+import { globSearchTool } from "@/coding/tools/glob-search";
+import { grepSearchTool } from "@/coding/tools/grep-search";
+import { listFilesTool } from "@/coding/tools/list-files";
+import { mkdirTool } from "@/coding/tools/mkdir";
+import { movePathTool } from "@/coding/tools/move-path";
+import { readFileTool } from "@/coding/tools/read-file";
+import { strReplaceTool } from "@/coding/tools/str-replace";
+import { writeFileTool } from "@/coding/tools/write-file";
+import type { Tool } from "@/foundation";
 
-import { createDefaultDebugCodingAgent } from "./coding-agent";
+import { createDefaultDebugAgent } from "./coding-agent";
 import { createDebugResourceStore, type DebugReadableResourceType, type DebugResourceStore, type DebugResourceType } from "./debug-resource-store";
 
 export interface DebugAgentService {
@@ -20,9 +35,10 @@ export interface DebugAgentService {
 
 export interface DebugAgentServiceOptions {
   archiveDir?: string;
-  createAgent?: () => Promise<Agent>;
+  createAgent?: (agentType?: AgentType) => Promise<Agent>;
   resourceStore?: DebugResourceStore;
   traceStore?: TraceStore;
+  workflowTools?: Tool[];
 }
 
 type UserSafeEvent = Pick<TraceEvent, "id" | "runId" | "type" | "timestamp" | "sequence"> & Record<string, unknown>;
@@ -30,6 +46,7 @@ type UserSafeEvent = Pick<TraceEvent, "id" | "runId" | "type" | "timestamp" | "s
 interface DebugSession {
   id: string;
   title: string;
+  agentType: AgentType;
   createdAt: string;
   updatedAt: string;
   agent?: Agent;
@@ -41,6 +58,7 @@ interface DebugSession {
 interface DebugSessionSummary {
   id: string;
   title: string;
+  agentType: AgentType;
   createdAt: string;
   updatedAt: string;
   active: boolean;
@@ -49,9 +67,10 @@ interface DebugSessionSummary {
 
 export function createDebugAgentService({
   archiveDir = join(process.cwd(), ".helixent", "debug-panel", "archives"),
-  createAgent = createDefaultDebugCodingAgent,
+  createAgent = createDefaultDebugAgent,
   resourceStore = createDebugResourceStore(),
   traceStore = new InMemoryTraceStore(),
+  workflowTools = createDefaultWorkflowTools(),
 }: DebugAgentServiceOptions = {}): DebugAgentService {
   const sessions = new Map<string, DebugSession>();
 
@@ -61,13 +80,16 @@ export function createDebugAgentService({
       const url = new URL(request.url);
 
       if (request.method === "POST" && url.pathname === "/api/agent/runs") {
-        const body = await readJson<{ message?: string; sessionId?: string }>(request);
+        const body = await readJson<{ agentType?: unknown; message?: string; sessionId?: string }>(request);
         const message = body.message?.trim();
         if (!message) {
           return jsonResponse({ error: "message is required" }, 400);
         }
+        const agentType = readAgentType(body.agentType);
 
-        const session = body.sessionId ? sessions.get(body.sessionId) : createSession(sessions, "New conversation");
+        const session = body.sessionId
+          ? sessions.get(body.sessionId)
+          : createSession(sessions, AGENT_PROFILES[agentType].name, agentType);
         if (!session) {
           return jsonResponse({ error: "session not found" }, 404);
         }
@@ -75,6 +97,43 @@ export function createDebugAgentService({
         const runId = `run_${crypto.randomUUID()}`;
         enqueueRun({ session, runId, message, createAgent, traceStore });
         return jsonResponse({ runId, sessionId: session.id });
+      }
+
+      if (request.method === "POST" && url.pathname === "/api/workflows/runs") {
+        const body = await readJson<{ agentType?: unknown; input?: unknown; sessionId?: string; workflowId?: string }>(request);
+        const workflowId = body.workflowId?.trim();
+        if (!workflowId) {
+          return jsonResponse({ error: "workflowId is required" }, 400);
+        }
+        const sessionId = body.sessionId?.trim();
+        if (sessionId && !sessions.has(sessionId)) {
+          return jsonResponse({ error: "session not found" }, 404);
+        }
+
+        const resources = await resourceStore.listResources();
+        const workflowResource = resources.workflow.find((resource) => resource.id === workflowId);
+        if (!workflowResource) {
+          return jsonResponse({ error: "workflow not found" }, 404);
+        }
+
+        const workflowRunId = `workflow_run_${crypto.randomUUID()}`;
+        const session = sessionId ? sessions.get(sessionId) : undefined;
+        const input = {
+          cwd: process.cwd(),
+          ...readObject(body.input),
+        };
+        runWorkflowInBackground({
+          agentType: readAgentType(body.agentType),
+          createAgent,
+          input,
+          runId: workflowRunId,
+          session,
+          sessionId,
+          tools: workflowTools,
+          traceStore,
+          workflowPath: workflowResource.path,
+        });
+        return jsonResponse({ workflowRunId, status: "running" });
       }
 
       if (request.method === "GET" && url.pathname === "/api/internal/sessions") {
@@ -92,8 +151,9 @@ export function createDebugAgentService({
       }
 
       if (request.method === "POST" && url.pathname === "/api/internal/sessions") {
-        const body = await readJson<{ title?: string }>(request);
-        const session = createSession(sessions, body.title?.trim() || "New conversation");
+        const body = await readJson<{ agentType?: unknown; title?: string }>(request);
+        const agentType = readAgentType(body.agentType);
+        const session = createSession(sessions, body.title?.trim() || AGENT_PROFILES[agentType].name, agentType);
         return jsonResponse({ sessionId: session.id, session: summarizeSession(session) });
       }
 
@@ -202,11 +262,28 @@ export function createDebugAgentService({
   };
 }
 
-function createSession(sessions: Map<string, DebugSession>, title: string): DebugSession {
+function createDefaultWorkflowTools(): Tool[] {
+  return [
+    bashTool,
+    fileInfoTool,
+    listFilesTool,
+    globSearchTool,
+    grepSearchTool,
+    mkdirTool,
+    movePathTool,
+    readFileTool,
+    writeFileTool,
+    strReplaceTool,
+    applyPatchTool,
+  ];
+}
+
+function createSession(sessions: Map<string, DebugSession>, title: string, agentType: AgentType = "gma"): DebugSession {
   const now = new Date().toISOString();
   const session = {
     id: `session_${crypto.randomUUID()}`,
     title,
+    agentType,
     createdAt: now,
     updatedAt: now,
     runCount: 0,
@@ -225,6 +302,7 @@ function summarizeSession(session: DebugSession): DebugSessionSummary {
   return {
     id: session.id,
     title: session.title,
+    agentType: session.agentType,
     createdAt: session.createdAt,
     updatedAt: session.updatedAt,
     active: Boolean(session.agent),
@@ -242,19 +320,19 @@ function enqueueRun({
   session: DebugSession;
   runId: string;
   message: string;
-  createAgent: () => Promise<Agent>;
+  createAgent: (agentType?: AgentType) => Promise<Agent>;
   traceStore: TraceStore;
 }) {
   session.updatedAt = new Date().toISOString();
   session.runCount += 1;
-  if (session.title === "New conversation") {
-    session.title = previewSessionTitle(message);
-  }
   session.queue = session.queue
     .catch(() => undefined)
     .then(async () => {
       if (session.deleted) return;
-      session.agent ??= await createAgent();
+      session.agent ??= await createAgent(session.agentType);
+      if (session.agent.name) {
+        session.title = session.agent.name;
+      }
       await runAgent({
         runId,
         sessionId: session.id,
@@ -274,6 +352,83 @@ function deleteSessionRuns(traceStore: TraceStore, sessionId: string): number {
     traceStore.deleteRun(runId);
   }
   return runIds.length;
+}
+
+function runWorkflowInBackground({
+  agentType,
+  createAgent,
+  input,
+  runId,
+  session,
+  sessionId,
+  tools,
+  traceStore,
+  workflowPath,
+}: {
+  agentType: AgentType;
+  createAgent: (agentType?: AgentType) => Promise<Agent>;
+  input: Record<string, unknown>;
+  runId: string;
+  session?: DebugSession;
+  sessionId?: string;
+  tools: Tool[];
+  traceStore: TraceStore;
+  workflowPath: string;
+}) {
+  const executeWorkflow = async () => {
+    try {
+      const workflow = await readWorkflowFile(workflowPath);
+      for await (const event of runWorkflow({
+        workflow,
+        input,
+        tools,
+        resolveAgent: async () => {
+          if (!session) {
+            return createAgent(agentType);
+          }
+          session.agent ??= await createAgent(session.agentType);
+          if (session.agent.name) {
+            session.title = session.agent.name;
+          }
+          return session.agent;
+        },
+      })) {
+        traceStore.append(runId, sessionId ? { ...event, sessionId } : event);
+      }
+      if (session) {
+        session.updatedAt = new Date().toISOString();
+      }
+    } catch (error) {
+      if (traceStore.getEvents(runId).some((event) => event.type === "workflow_failed")) return;
+      traceStore.append(runId, {
+        type: "workflow_failed",
+        workflowId: "unknown",
+        workflowName: "Unknown Workflow",
+        durationMs: 0,
+        sessionId,
+        error: {
+          message: error instanceof Error ? error.message : String(error),
+        },
+      });
+      if (session) {
+        session.updatedAt = new Date().toISOString();
+      }
+    }
+  };
+
+  if (!session) {
+    void executeWorkflow();
+    return;
+  }
+
+  session.updatedAt = new Date().toISOString();
+  session.runCount += 1;
+  session.queue = session.queue
+    .catch(() => undefined)
+    .then(async () => {
+      if (session.deleted) return;
+      await executeWorkflow();
+    });
 }
 
 async function archiveSession({
@@ -320,7 +475,7 @@ function safeFileSegment(value: string): string {
     .toLowerCase()
     .replace(/[^a-z0-9._-]+/g, "-")
     .replace(/^-+|-+$/g, "")
-    .slice(0, 48) || "conversation";
+    .slice(0, 48) || "agent";
 }
 
 function fileSafeTimestamp(value: string): string {
@@ -328,11 +483,15 @@ function fileSafeTimestamp(value: string): string {
 }
 
 function isResourceType(value: unknown): value is DebugResourceType {
-  return value === "prompt" || value === "skill" || value === "tool";
+  return value === "prompt" || value === "skill" || value === "tool" || value === "workflow";
 }
 
 function isReadableResourceType(value: unknown): value is DebugReadableResourceType {
   return isResourceType(value) || value === "archive";
+}
+
+function readAgentType(value: unknown): AgentType {
+  return isAgentType(value) ? value : "gma";
 }
 
 async function runAgent({
@@ -375,10 +534,6 @@ function toTraceEventInput(event: AgentEvent, sessionId: string): TraceEventInpu
   return event;
 }
 
-function previewSessionTitle(value: string): string {
-  return value.length > 36 ? `${value.slice(0, 33)}...` : value;
-}
-
 function toUserSafeEvent(event: TraceEvent): UserSafeEvent | null {
   if (event.type === "final_answer") {
     return pickEvent(event, { text: event.text });
@@ -412,6 +567,10 @@ async function readJson<T>(request: Request): Promise<T> {
   } catch {
     return {} as T;
   }
+}
+
+function readObject(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
 
 function jsonResponse(value: unknown, status = 200): Response {

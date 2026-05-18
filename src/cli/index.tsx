@@ -7,7 +7,7 @@ import { validateIntegrity } from "@/cli/bootstrap";
 import { registerCommands } from "@/cli/commands";
 import { loadConfig } from "@/cli/config";
 import { SettingsLoader, SettingsWriter } from "@/cli/settings";
-import { createCodingAgent, globalApprovalManager, globalAskUserQuestionManager } from "@/coding";
+import { createGmaAgent, globalApprovalManager, globalAskUserQuestionManager } from "@/coding";
 import { AnthropicModelProvider } from "@/community/anthropic";
 import { OpenAIModelProvider } from "@/community/openai";
 import type { ModelProvider } from "@/foundation";
@@ -71,7 +71,7 @@ if (args.length > 0) {
 
   const settingsLoader = new SettingsLoader();
   const settingsWriter = new SettingsWriter(settingsLoader);
-  const agent = await createCodingAgent({
+  const agent = await createGmaAgent({
     model,
     skillsDirs,
     askUser: globalApprovalManager.askUser,

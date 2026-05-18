@@ -1,9 +1,9 @@
 import { readdir, rm } from "node:fs/promises";
 import { basename, join } from "node:path";
 
-import { createLeadAgentPrompt } from "@/coding/agents/lead-agent-prompt";
+import { createGmaAgentPrompt } from "@/coding/agents/lead-agent-prompt";
 
-export type DebugResourceType = "prompt" | "skill" | "tool";
+export type DebugResourceType = "prompt" | "skill" | "tool" | "workflow";
 export type DebugReadableResourceType = DebugResourceType | "archive";
 
 export interface DebugResource {
@@ -12,7 +12,7 @@ export interface DebugResource {
   name: string;
   content: string;
   path: string;
-  language: "json" | "markdown" | "typescript" | "xml";
+  language: "json" | "markdown" | "typescript" | "xml" | "yaml";
   active: boolean;
   readOnly?: boolean;
 }
@@ -38,6 +38,7 @@ export function createDebugResourceStore({ cwd = process.cwd() }: { cwd?: string
         prompt: [await readResource({ id: "system", type: "prompt", name: "System Prompt", path: promptPath, active: true })],
         skill: await listSkillResources(cwd),
         tool: await listToolResources(cwd),
+        workflow: await listWorkflowResources(cwd),
         archive: await listArchiveResources(archivesDir),
       };
     },
@@ -55,6 +56,11 @@ export function createDebugResourceStore({ cwd = process.cwd() }: { cwd?: string
       if (type === "skill") {
         const path = join(cwd, `skills/${slug}/SKILL.md`);
         await writeNewFile(path, createSkillTemplate(name));
+        return readResource({ id: slug, type, name: slug, path, active: true });
+      }
+      if (type === "workflow") {
+        const path = join(cwd, `workflows/${slug}.workflow.yaml`);
+        await writeNewFile(path, createWorkflowTemplate(slug, name));
         return readResource({ id: slug, type, name: slug, path, active: true });
       }
       const path = join(cwd, `src/coding/tools/${slug}.ts`);
@@ -116,6 +122,21 @@ async function listToolResources(cwd: string): Promise<DebugResource[]> {
   return resources.sort(compareResource);
 }
 
+async function listWorkflowResources(cwd: string): Promise<DebugResource[]> {
+  const workflowsDir = join(cwd, "workflows");
+  const entries = await safeReaddir(workflowsDir);
+  const resources = await Promise.all(
+    entries
+      .filter((entry) => entry.endsWith(".workflow.yaml") || entry.endsWith(".workflow.yml") || entry.endsWith(".workflow.json"))
+      .map(async (entry) => {
+        const name = entry
+          .replace(/\.workflow\.(yaml|yml|json)$/u, "");
+        return readResource({ id: slugify(name), type: "workflow", name, path: join(workflowsDir, entry), active: true });
+      }),
+  );
+  return resources.sort(compareResource);
+}
+
 async function listArchiveResources(archivesDir: string): Promise<DebugResource[]> {
   const entries = await safeReaddir(archivesDir);
   const resources = await Promise.all(
@@ -144,7 +165,7 @@ async function readResource(resource: Omit<DebugResource, "content" | "language"
 
 async function ensureDefaultPrompt(path: string, cwd: string) {
   if (await Bun.file(path).exists()) return;
-  await Bun.write(path, createLeadAgentPrompt(cwd));
+  await Bun.write(path, createGmaAgentPrompt(cwd));
 }
 
 async function writeNewFile(path: string, content: string) {
@@ -166,6 +187,7 @@ function languageFor(type: DebugReadableResourceType): DebugResource["language"]
   if (type === "archive") return "json";
   if (type === "tool") return "typescript";
   if (type === "skill") return "markdown";
+  if (type === "workflow") return "yaml";
   return "xml";
 }
 
@@ -192,6 +214,10 @@ function createSkillTemplate(name: string): string {
 function createToolTemplate(name: string): string {
   const exportName = `${camelCase(name)}Tool`;
   return `import z from "zod";\n\nimport { defineTool } from "@/foundation";\n\nimport { okToolResult } from "./tool-result";\n\nexport const ${exportName} = defineTool({\n  name: "${name}",\n  description: "Describe what this tool does.",\n  parameters: z.object({\n    description: z.string().describe("Explain why you want to use this tool."),\n  }),\n  invoke: async ({ description }) => okToolResult("Tool executed.", { description }),\n});\n`;
+}
+
+function createWorkflowTemplate(id: string, name: string): string {
+  return `id: ${id}\nname: ${name}\nversion: 1\n\ninputs:\n  cwd:\n    type: string\n    required: true\n    description: Absolute workspace path to inspect.\n\nsteps:\n  - id: inspect\n    name: Inspect\n    type: tool\n    tool: list_files\n    input:\n      description: Inspect the workspace before continuing.\n      path: $input.cwd\n      recursive: false\n`;
 }
 
 function camelCase(value: string): string {

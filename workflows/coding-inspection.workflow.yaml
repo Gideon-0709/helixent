@@ -1,0 +1,53 @@
+# Inspect a coding workspace with existing coding tools.
+
+id: coding-inspection
+name: Coding Inspection
+version: 1
+agentTypes:
+  - gma
+
+inputs:
+  cwd:
+    type: string
+    required: true
+    description: Absolute workspace path to inspect.
+  targetFile:
+    type: string
+    required: true
+    description: Absolute file path to read after searching.
+
+steps:
+  - id: list_workspace
+    name: List Workspace
+    type: tool
+    tool: list_files
+    input:
+      description: Inspect the workspace root before searching.
+      path: $input.cwd
+      recursive: false
+      limit: 80
+      maxChars: 8000
+
+  - id: find_workflow_code
+    name: Find Workflow Code
+    type: tool
+    tool: grep_search
+    input:
+      description: Find workflow-related TypeScript code in the workspace.
+      path: $input.cwd
+      pattern: workflow
+      glob: "*.ts"
+      caseSensitive: false
+      limit: 40
+      maxChars: 12000
+
+  - id: read_target_file
+    name: Read Target File
+    type: tool
+    tool: read_file
+    input:
+      description: Read the selected workflow implementation file.
+      path: $input.targetFile
+      startLine: 1
+      endLine: 120
+      maxChars: 12000

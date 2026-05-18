@@ -28,9 +28,62 @@ import { readFileTool } from "../tools/read-file";
 import { strReplaceTool } from "../tools/str-replace";
 import { writeFileTool } from "../tools/write-file";
 
-import { createLeadAgentPrompt } from "./lead-agent-prompt";
+import { AGENT_PROFILES, type AgentType } from "./agent-profiles";
+import { createAgentPrompt, createGmaAgentPrompt } from "./lead-agent-prompt";
 
-export async function createCodingAgent({
+export const GMA_AGENT_NAME = "GMA";
+export const RM_AGENT_NAME = "RM";
+export const SM_AGENT_NAME = "SM";
+
+interface CreateRoleAgentOptions {
+  model: Model;
+  cwd?: string;
+  skillsDirs?: string[];
+  prompt?: string;
+  // eslint-disable-next-line no-unused-vars
+  askUser?: (toolUse: ToolUseContent) => Promise<ApprovalDecision>;
+  // eslint-disable-next-line no-unused-vars
+  askUserQuestion?: (params: AskUserQuestionParameters) => Promise<AskUserQuestionResult>;
+  approvalPersistence?: ApprovalPersistence;
+}
+
+export async function createRoleAgent({
+  agentType = "gma",
+  model,
+  cwd = process.cwd(),
+  skillsDirs = [join(process.cwd(), ".agents/skills")],
+  askUser,
+  askUserQuestion,
+  approvalPersistence,
+  prompt,
+}: CreateRoleAgentOptions & { agentType?: AgentType }) {
+  const profile = AGENT_PROFILES[agentType];
+  return createAgent({
+    name: profile.name,
+    model,
+    cwd,
+    skillsDirs,
+    prompt: prompt ?? createAgentPrompt(cwd, agentType),
+    askUser,
+    askUserQuestion,
+    approvalPersistence,
+  });
+}
+
+export async function createGmaAgent(options: CreateRoleAgentOptions) {
+  return createRoleAgent({ ...options, agentType: "gma", prompt: options.prompt ?? createGmaAgentPrompt(options.cwd ?? process.cwd()) });
+}
+
+export async function createRmAgent(options: CreateRoleAgentOptions) {
+  return createRoleAgent({ ...options, agentType: "rm" });
+}
+
+export async function createSmAgent(options: CreateRoleAgentOptions) {
+  return createRoleAgent({ ...options, agentType: "sm" });
+}
+
+async function createAgent({
+  name,
   model,
   cwd = process.cwd(),
   skillsDirs = [join(process.cwd(), ".agents/skills")],
@@ -39,10 +92,11 @@ export async function createCodingAgent({
   approvalPersistence,
   prompt,
 }: {
+  name: string;
   model: Model;
   cwd?: string;
   skillsDirs?: string[];
-  prompt?: string;
+  prompt: string;
   // eslint-disable-next-line no-unused-vars
   askUser?: (toolUse: ToolUseContent) => Promise<ApprovalDecision>;
   // eslint-disable-next-line no-unused-vars
@@ -80,8 +134,9 @@ export async function createCodingAgent({
   }
 
   return new Agent({
+    name,
     model,
-    prompt: prompt ?? createLeadAgentPrompt(cwd),
+    prompt,
     messages,
     tools: [
       bashTool,

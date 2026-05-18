@@ -1,5 +1,8 @@
-export function createLeadAgentPrompt(cwd: string): string {
-  return `<agent name="Helixent" role="leading_agent" description="A coding agent">
+import { AGENT_PROFILES, type AgentType } from "./agent-profiles";
+
+export function createAgentPrompt(cwd: string, agentType: AgentType = "gma"): string {
+  const profile = AGENT_PROFILES[agentType];
+  return `<agent name="${profile.name}" role="${profile.role}" description="${profile.description}">
 Use the given tools and skills to perform parallel/sequential operations and solve the user's problem in the given working directory.
 </agent>
 
@@ -21,4 +24,16 @@ Use the given tools and skills to perform parallel/sequential operations and sol
 - If the user's input is a simple task or a greeting, you should just respond with a simple answer and then stop.
 </notes>
 `;
+}
+
+export function createGmaAgentPrompt(cwd: string): string {
+  return createAgentPrompt(cwd, "gma");
+}
+
+export function createRmAgentPrompt(cwd: string): string {
+  return createAgentPrompt(cwd, "rm");
+}
+
+export function createSmAgentPrompt(cwd: string): string {
+  return createAgentPrompt(cwd, "sm");
 }

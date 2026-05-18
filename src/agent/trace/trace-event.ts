@@ -146,6 +146,69 @@ export interface ProgressToolTraceEvent extends TraceEventBase {
   input: unknown;
 }
 
+export interface WorkflowStartedEvent extends TraceEventBase {
+  type: "workflow_started";
+  workflowId: string;
+  workflowName: string;
+  input: unknown;
+  sessionId?: string;
+}
+
+export interface WorkflowStepStartedEvent extends TraceEventBase {
+  type: "workflow_step_started";
+  workflowId: string;
+  stepId: string;
+  stepIndex: number;
+  stepType: "agent" | "tool";
+  sessionId?: string;
+}
+
+export interface WorkflowStepCompletedEvent extends TraceEventBase {
+  type: "workflow_step_completed";
+  workflowId: string;
+  stepId: string;
+  stepIndex: number;
+  stepType: "agent" | "tool";
+  durationMs: number;
+  result: unknown;
+  sessionId?: string;
+}
+
+export interface WorkflowStepFailedEvent extends TraceEventBase {
+  type: "workflow_step_failed";
+  workflowId: string;
+  stepId: string;
+  stepIndex: number;
+  stepType: "agent" | "tool";
+  durationMs: number;
+  sessionId?: string;
+  error: {
+    message: string;
+    code?: string;
+  };
+}
+
+export interface WorkflowCompletedEvent extends TraceEventBase {
+  type: "workflow_completed";
+  workflowId: string;
+  workflowName: string;
+  durationMs: number;
+  result: unknown;
+  sessionId?: string;
+}
+
+export interface WorkflowFailedEvent extends TraceEventBase {
+  type: "workflow_failed";
+  workflowId: string;
+  workflowName: string;
+  durationMs: number;
+  sessionId?: string;
+  error: {
+    message: string;
+    code?: string;
+  };
+}
+
 export type TraceEvent =
   | RunStartedEvent
   | RunCompletedEvent
@@ -166,7 +229,13 @@ export type TraceEvent =
   | ToolCompletedEvent
   | ToolFailedEvent
   | ProgressThinkingTraceEvent
-  | ProgressToolTraceEvent;
+  | ProgressToolTraceEvent
+  | WorkflowStartedEvent
+  | WorkflowStepStartedEvent
+  | WorkflowStepCompletedEvent
+  | WorkflowStepFailedEvent
+  | WorkflowCompletedEvent
+  | WorkflowFailedEvent;
 
 type TraceEventMetadataKey = "id" | "runId" | "timestamp" | "sequence";
 

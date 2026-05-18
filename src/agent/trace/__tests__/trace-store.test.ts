@@ -43,4 +43,30 @@ describe("InMemoryTraceStore", () => {
     expect(store.getEvents("run_1")).toEqual([]);
     expect(store.getEvents("run_2")).toEqual([]);
   });
+
+  test("summarizes workflow runs from workflow events", () => {
+    const store = new InMemoryTraceStore();
+
+    store.append("workflow_run_1", {
+      type: "workflow_started",
+      workflowId: "business-brief",
+      workflowName: "Business Brief",
+      input: { scopeId: "company" },
+    });
+    store.append("workflow_run_1", {
+      type: "workflow_completed",
+      workflowId: "business-brief",
+      workflowName: "Business Brief",
+      durationMs: 12,
+      result: { ok: true },
+    });
+
+    expect(store.listRuns()[0]).toMatchObject({
+      runId: "workflow_run_1",
+      status: "completed",
+      inputPreview: "Business Brief",
+      durationMs: 12,
+      lastEventType: "workflow_completed",
+    });
+  });
 });

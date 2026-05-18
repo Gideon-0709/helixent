@@ -1,7 +1,18 @@
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode, type UIEvent } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
+  type UIEvent,
+} from "react";
 
 import {
   aggregateTokenStats,
+  AGENT_PROFILES,
+  addDraftSession,
   cloneDefaultResources,
   DRAFT_SESSION_PREFIX,
   isDraftSessionId,
@@ -9,6 +20,7 @@ import {
   subtractTokenStats,
   toKeyEvent,
   visibleSessions,
+  type AgentType,
   type EditableResource,
   type PanelTraceEvent,
   type PanelSessionSummary,
@@ -39,12 +51,14 @@ export function App() {
   const [newResourceName, setNewResourceName] = useState("");
   const [sessions, setSessions] = useState<PanelSessionSummary[]>([]);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
+  const [newAgentType, setNewAgentType] = useState<AgentType>("gma");
   const [runs, setRuns] = useState<RunSummary[]>([]);
   const [runSessionIds, setRunSessionIds] = useState<Map<string, string>>(() => new Map());
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [eventsByRun, setEventsByRun] = useState<Map<string, PanelTraceEvent[]>>(() => new Map());
   const [tokenStatsBaseline, setTokenStatsBaseline] = useState({ prompt: 0, completion: 0, total: 0 });
   const [isSavingResource, setIsSavingResource] = useState(false);
+  const [isRunningWorkflow, setIsRunningWorkflow] = useState(false);
   const [editorStatus, setEditorStatus] = useState("Loading resources...");
   const [connectionStatus, setConnectionStatus] = useState("Connecting...");
 
@@ -59,7 +73,21 @@ export function App() {
   const isDirty = selected?.content !== savedSelected?.content;
   const isReadOnlyResource = selectedResource.type === "archive" || selected?.readOnly === true;
   const sessionRuns = selectedSessionId ? runs.filter((run) => runBelongsToSession(run, selectedSessionId, runSessionIds)) : runs;
+  const selectableRuns = useMemo(
+    () => includeSelectedRun(sessionRuns, runs, selectedRunId),
+    [runs, selectedRunId, sessionRuns],
+  );
   const visibleSessionList = useMemo(() => visibleSessions(sessions), [sessions]);
+  const selectedSession = selectedSessionId ? sessions.find((session) => session.id === selectedSessionId) : undefined;
+  const composerAgentName = selectedSession?.title ?? AGENT_PROFILES[newAgentType].name;
+  const agentOptions = useMemo(
+    () => Object.values(AGENT_PROFILES).map((profile) => ({ value: profile.type, label: profile.name })),
+    [],
+  );
+  const agentSelectWidth = useMemo(() => {
+    const maxLabelLength = Math.max(0, ...agentOptions.map((option) => option.label.length));
+    return `calc(${maxLabelLength}ch + 58px)`;
+  }, [agentOptions]);
   const selectedEvents = selectedRunId
     ? eventsByRun.get(selectedRunId) ?? []
     : collectSessionEvents({ runs: sessionRuns, eventsByRun, runSessionIds, selectedSessionId });
@@ -152,8 +180,8 @@ export function App() {
   }
 
   function handleNewSession() {
-    const session = createDraftSession();
-    setSessions((current) => [session, ...current.filter((item) => !item.draft)]);
+    const session = createDraftSession(newAgentType);
+    setSessions((current) => addDraftSession(current, session));
     setSelectedSessionId(session.id);
     setSelectedRunId(null);
   }
@@ -207,9 +235,9 @@ export function App() {
     await refreshArchiveResources();
   }
 
-  async function handleClearConversations() {
+  async function handleClearAgents() {
     if (runs.length === 0 && visibleSessionList.length === 0) return;
-    if (!window.confirm("Clear all conversations, runs, and trace events from memory?")) return;
+    if (!window.confirm("Clear all agents, runs, and trace events from memory?")) return;
 
     const response = await fetch("/api/internal/sessions", { method: "DELETE" });
     if (!response.ok) return;
@@ -237,24 +265,28 @@ export function App() {
     setRunSessionIds((current) => mergeRunSessionIds(current, nextRuns));
   }
 
-  async function loadRunEvents(runId: string) {
+  async function loadRunEvents(runId: string): Promise<PanelTraceEvent[]> {
     const response = await fetch(`/api/internal/runs/${encodeURIComponent(runId)}/events`);
+    if (!response.ok) return [];
     const events = (await response.json()) as PanelTraceEvent[];
-    const runStarted = events.find((event) => event.type === "run_started" && typeof event.sessionId === "string");
-    if (runStarted && typeof runStarted.sessionId === "string") {
-      setRunSessionIds((current) => new Map(current).set(runId, runStarted.sessionId as string));
+    const sessionEvent = events.find((event) => typeof event.sessionId === "string");
+    if (sessionEvent && typeof sessionEvent.sessionId === "string") {
+      setRunSessionIds((current) => new Map(current).set(runId, sessionEvent.sessionId as string));
     }
     setEventsByRun((current) => new Map(current).set(runId, events));
+    return events;
   }
 
   async function startRun(message: string) {
     const trimmed = message.trim();
     if (!trimmed) return;
+    const selectedSession = selectedSessionId ? sessions.find((session) => session.id === selectedSessionId) : undefined;
     const sessionId = selectedSessionId && !isDraftSessionId(selectedSessionId) ? selectedSessionId : undefined;
+    const agentType = selectedSession?.agentType ?? newAgentType;
     const response = await fetch("/api/agent/runs", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ message: trimmed, sessionId }),
+      body: JSON.stringify({ agentType, message: trimmed, sessionId }),
     });
     const payload = (await response.json()) as { runId: string; sessionId: string };
     setSelectedRunId(null);
@@ -267,6 +299,129 @@ export function App() {
     await loadSessions();
     await loadRuns();
     await loadRunEvents(payload.runId);
+  }
+
+  async function runSelectedWorkflow() {
+    if (selectedResource.type !== "workflow" || !selected || isDirty || isRunningWorkflow) return;
+    if (!selectedSession) {
+      recordWorkflowStartFailure("Select an agent before running workflow");
+      return;
+    }
+    setIsRunningWorkflow(true);
+    setEditorStatus("Starting workflow...");
+    try {
+      let workflowSession = selectedSession;
+      if (isDraftSessionId(workflowSession.id)) {
+        const serverSession = await createServerSession(workflowSession);
+        if (!serverSession) {
+          recordWorkflowStartFailure("Failed to create agent session");
+          return;
+        }
+        workflowSession = serverSession;
+      }
+
+      let { response, payload } = await startWorkflowRequest(workflowSession);
+      if (!response.ok && payload.error === "session not found") {
+        const serverSession = await createServerSession(workflowSession);
+        if (!serverSession) {
+          recordWorkflowStartFailure("Failed to recreate agent session");
+          return;
+        }
+        workflowSession = serverSession;
+        ({ response, payload } = await startWorkflowRequest(workflowSession));
+      }
+
+      if (!response.ok || !payload.workflowRunId) {
+        recordWorkflowStartFailure(payload.error ?? "Workflow failed to start");
+        return;
+      }
+      setSelectedRunId(payload.workflowRunId);
+      setEventsByRun((current) => {
+        if (current.has(payload.workflowRunId!)) return current;
+        return new Map(current).set(payload.workflowRunId!, []);
+      });
+      setRunSessionIds((current) => new Map(current).set(payload.workflowRunId!, workflowSession.id));
+      setEditorStatus(`Workflow queued: ${payload.workflowRunId}`);
+      await loadRuns();
+      const events = await loadRunEvents(payload.workflowRunId);
+      setEditorStatus(workflowStatusText(payload.workflowRunId, events));
+    } catch (error) {
+      recordWorkflowStartFailure(error instanceof Error ? error.message : "Workflow failed to start");
+    } finally {
+      setIsRunningWorkflow(false);
+    }
+  }
+
+  async function startWorkflowRequest(session: PanelSessionSummary) {
+    const response = await fetch("/api/workflows/runs", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        agentType: session.agentType,
+        sessionId: session.id,
+        workflowId: selected?.id,
+      }),
+    });
+    const payload = (await response.json()) as { error?: string; workflowRunId?: string };
+    return { response, payload };
+  }
+
+  async function createServerSession(session: PanelSessionSummary): Promise<PanelSessionSummary | null> {
+    const response = await fetch("/api/internal/sessions", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        agentType: session.agentType,
+        title: session.title,
+      }),
+    });
+    if (!response.ok) return null;
+
+    const payload = (await response.json()) as { sessionId: string; session?: PanelSessionSummary };
+    const now = new Date().toISOString();
+    const serverSession: PanelSessionSummary = payload.session ?? {
+      ...session,
+      id: payload.sessionId,
+      createdAt: now,
+      updatedAt: now,
+      active: false,
+      draft: false,
+      runCount: 0,
+    };
+    setSessions((current) => [serverSession, ...current.filter((item) => item.id !== session.id && item.id !== serverSession.id)]);
+    setSelectedSessionId(serverSession.id);
+    return serverSession;
+  }
+
+  function recordWorkflowStartFailure(message: string) {
+    const runId = `workflow_run_local_${crypto.randomUUID()}`;
+    const timestamp = new Date().toISOString();
+    const event: PanelTraceEvent = {
+      id: crypto.randomUUID(),
+      runId,
+      type: "workflow_failed",
+      timestamp,
+      sequence: 1,
+      workflowId: selectedResource.type === "workflow" ? selectedResource.id : "unknown",
+      workflowName: selected?.name ?? "Unknown Workflow",
+      durationMs: 0,
+      error: { message },
+    };
+    setSelectedRunId(runId);
+    if (selectedSessionId) {
+      setRunSessionIds((current) => new Map(current).set(runId, selectedSessionId));
+    }
+    setRuns((current) => [
+      {
+        runId,
+        status: "failed",
+        updatedAt: timestamp,
+        inputPreview: selected?.name ?? "Workflow start",
+      },
+      ...current,
+    ]);
+    setEventsByRun((current) => new Map(current).set(runId, [event]));
+    setEditorStatus(`Workflow failed to start: ${message}`);
   }
 
   function updateSelectedResourceContent(content: string) {
@@ -396,25 +551,32 @@ export function App() {
         <aside className="stats" data-panel-section="stats">
           <div className="conversations">
             <div className="conversation-header">
-              <h2>Conversations</h2>
+              <h2>Agents</h2>
               <div className="conversation-actions">
+                <CustomSelect
+                  ariaLabel="New agent type"
+                  value={newAgentType}
+                  options={agentOptions}
+                  onChange={(value) => setNewAgentType(value as AgentType)}
+                  style={{ width: agentSelectWidth }}
+                />
                 <button
                   type="button"
                   className="icon-button"
-                  aria-label="Clear conversations"
-                  title="Clear conversations"
+                  aria-label="Clear agents"
+                  title="Clear agents"
                   disabled={runs.length === 0 && visibleSessionList.length === 0}
-                  onClick={() => void handleClearConversations()}
+                  onClick={() => void handleClearAgents()}
                 >
                   <SweepIcon />
                 </button>
-                <button type="button" className="icon-button" aria-label="New conversation" title="New conversation" onClick={handleNewSession}>
+                <button type="button" className="icon-button" aria-label="New agent" title="New agent" onClick={handleNewSession}>
                   <PlusIcon />
                 </button>
               </div>
             </div>
             <div className="conversation-list">
-              {visibleSessionList.length === 0 ? <div className="conversation-empty">No conversations yet.</div> : null}
+              {visibleSessionList.length === 0 ? <div className="conversation-empty">No agents yet.</div> : null}
               {visibleSessionList.map((session) => (
                 <div
                   key={session.id}
@@ -485,6 +647,22 @@ export function App() {
                   <button
                     type="button"
                     className="icon-button editor-action-button"
+                    aria-label="Run workflow"
+                    title={
+                      selectedResource.type === "workflow"
+                        ? isDirty
+                          ? "Save workflow before running"
+                          : "Run workflow"
+                        : "Run workflow is only available for workflow files"
+                    }
+                    disabled={selectedResource.type !== "workflow" || !selected || isDirty || isRunningWorkflow}
+                    onClick={() => void runSelectedWorkflow()}
+                  >
+                    <PlayIcon />
+                  </button>
+                  <button
+                    type="button"
+                    className="icon-button editor-action-button"
                     aria-label="Revert resource"
                     title="Revert resource"
                     disabled={!isDirty || isReadOnlyResource}
@@ -506,7 +684,7 @@ export function App() {
               </div>
               <div className="editor-resource-bar">
                 <div className="resource-tabs" aria-label="Resource type">
-                  {(["prompt", "skill", "tool", "archive"] as const).map((type) => (
+                  {(["prompt", "skill", "tool", "workflow", "archive"] as const).map((type) => (
                     <button
                       key={type}
                       type="button"
@@ -522,6 +700,7 @@ export function App() {
                   <CustomSelect
                     ariaLabel="File"
                     value={selectedResource.id}
+                    className="resource-select"
                     options={resources[selectedResource.type].map((resource) => ({ value: resource.id, label: resource.name }))}
                     onChange={(value) => handleResourceSelect(selectedResource.type, value)}
                   />
@@ -555,6 +734,7 @@ export function App() {
                         { value: "prompt", label: "Prompt" },
                         { value: "skill", label: "Skill" },
                         { value: "tool", label: "Tool" },
+                        { value: "workflow", label: "Workflow" },
                       ]}
                       onChange={(value) => setNewType(value as WritableResourceType)}
                     />
@@ -579,7 +759,7 @@ export function App() {
               </div>
             </div>
           </section>
-          <AgentComposer selectedRunId={selectedRunId} selectedSessionId={selectedSessionId} onSubmit={startRun} />
+          <AgentComposer agentName={composerAgentName} selectedRunId={selectedRunId} selectedSessionId={selectedSessionId} onSubmit={startRun} />
         </main>
 
         <aside className="events" data-panel-section="events">
@@ -589,8 +769,8 @@ export function App() {
               ariaLabel="Run filter"
               value={selectedRunId ?? "__session__"}
               options={[
-                { value: "__session__", label: "Whole conversation" },
-                ...sessionRuns.map((run) => ({ value: run.runId, label: `${run.status} · ${run.inputPreview ?? run.runId}` })),
+                { value: "__session__", label: "Whole agent context" },
+                ...selectableRuns.map((run) => ({ value: run.runId, label: `${run.status} · ${run.inputPreview ?? run.runId}` })),
               ]}
               onChange={handleRunSelect}
             />
@@ -609,10 +789,12 @@ export function App() {
 }
 
 function AgentComposer({
+  agentName,
   selectedRunId,
   selectedSessionId,
   onSubmit,
 }: {
+  agentName: string;
   selectedRunId: string | null;
   selectedSessionId: string | null;
   onSubmit: (message: string) => Promise<void>;
@@ -646,13 +828,13 @@ function AgentComposer({
       <div className="composer-box">
         <textarea
           id="promptInput"
-          placeholder="Ask the coding agent something..."
+          placeholder={`Ask ${agentName} something...`}
           value={message}
           onChange={(event) => setMessage(event.target.value)}
           onKeyDown={handleKeyDown}
         />
         <div className="composer-footer">
-          <span>{selectedRunId ?? selectedSessionId ?? "No active conversation"}</span>
+          <span>{selectedRunId ?? selectedSessionId ?? "No active agent"}</span>
           <button
             type="button"
             className="primary icon-button composer-send"
@@ -674,11 +856,15 @@ function CustomSelect({
   value,
   options,
   onChange,
+  className,
+  style,
 }: {
   ariaLabel: string;
   value: string;
   options: Array<{ value: string; label: string }>;
   onChange: (value: string) => void;
+  className?: string;
+  style?: CSSProperties;
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement | null>(null);
@@ -707,7 +893,7 @@ function CustomSelect({
   }
 
   return (
-    <div ref={ref} className={`custom-select ${open ? "open" : ""}`}>
+    <div ref={ref} className={`custom-select ${className ?? ""} ${open ? "open" : ""}`} style={style}>
       <button
         type="button"
         className="custom-select-trigger"
@@ -807,6 +993,14 @@ function SaveIcon() {
       <path d="M3 2.5h8.5L13 4v9.5H3z" />
       <path d="M5 2.5v4h5v-4" />
       <path d="M5 13.5V10h6v3.5" />
+    </svg>
+  );
+}
+
+function PlayIcon() {
+  return (
+    <svg viewBox="0 0 16 16" aria-hidden="true">
+      <path d="M5 3.5v9l7-4.5z" />
     </svg>
   );
 }
@@ -921,6 +1115,7 @@ function cloneResourceMap(resources: ResourceMap): ResourceMap {
     prompt: resources.prompt.map((resource) => ({ ...resource })),
     skill: resources.skill.map((resource) => ({ ...resource })),
     tool: resources.tool.map((resource) => ({ ...resource })),
+    workflow: resources.workflow.map((resource) => ({ ...resource })),
     archive: resources.archive.map((resource) => ({ ...resource })),
   };
 }
@@ -971,6 +1166,36 @@ function runBelongsToSession(run: RunSummary, sessionId: string, runSessionIds: 
   return run.sessionId === sessionId || runSessionIds.get(run.runId) === sessionId;
 }
 
+function includeSelectedRun(sessionRuns: RunSummary[], runs: RunSummary[], selectedRunId: string | null): RunSummary[] {
+  if (!selectedRunId || sessionRuns.some((run) => run.runId === selectedRunId)) {
+    return sessionRuns;
+  }
+  const selectedRun = runs.find((run) => run.runId === selectedRunId);
+  return selectedRun ? [selectedRun, ...sessionRuns] : sessionRuns;
+}
+
+function workflowStatusText(runId: string, events: PanelTraceEvent[]): string {
+  const failed = [...events].reverse().find((event) => event.type === "workflow_failed" || event.type === "workflow_step_failed");
+  if (failed) {
+    return `Workflow failed: ${panelEventErrorMessage(failed)}`;
+  }
+
+  const completed = [...events].reverse().find((event) => event.type === "workflow_completed");
+  if (completed) {
+    return `Workflow completed: ${runId}`;
+  }
+
+  return `Workflow running: ${runId}`;
+}
+
+function panelEventErrorMessage(event: PanelTraceEvent): string {
+  const error = event.error;
+  if (error && typeof error === "object" && "message" in error && typeof error.message === "string") {
+    return error.message;
+  }
+  return "Unknown error";
+}
+
 function mergeRunSessionIds(current: Map<string, string>, runs: RunSummary[]): Map<string, string> {
   const next = new Map(current);
   for (const run of runs) {
@@ -981,11 +1206,12 @@ function mergeRunSessionIds(current: Map<string, string>, runs: RunSummary[]): M
   return next;
 }
 
-function createDraftSession(): PanelSessionSummary {
+function createDraftSession(agentType: AgentType): PanelSessionSummary {
   const now = new Date().toISOString();
   return {
     id: `${DRAFT_SESSION_PREFIX}${crypto.randomUUID()}`,
-    title: "New conversation",
+    title: AGENT_PROFILES[agentType].name,
+    agentType,
     createdAt: now,
     updatedAt: now,
     active: false,

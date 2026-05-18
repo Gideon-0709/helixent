@@ -1,0 +1,49 @@
+# A machine-readable workflow template.
+# Keep this file valid YAML: the framework parses it directly.
+
+id: workflow-template
+name: Workflow Template
+version: 1
+agentTypes:
+  - gma
+  - rm
+  - sm
+
+inputs:
+  task:
+    type: string
+    required: true
+    description: The business task or question to process.
+  scopeId:
+    type: string
+    required: false
+    description: Optional organization, region, or store scope.
+
+steps:
+  - id: collect_context
+    name: Collect Context
+    type: tool
+    tool: example.collect_context
+    input:
+      task: $input.task
+      scopeId: $input.scopeId
+
+  - id: analyze_context
+    name: Analyze Context
+    type: agent
+    skill: example-analysis
+    message: |
+      Analyze the task using the collected context.
+
+      Task: $input.task
+      Scope: $input.scopeId
+      Context: $steps.collect_context.result
+
+  - id: save_result
+    name: Save Result
+    type: tool
+    tool: example.save_result
+    input:
+      task: $input.task
+      scopeId: $input.scopeId
+      analysis: $steps.analyze_context.result

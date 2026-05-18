@@ -79,17 +79,35 @@ function summarizeRun(runId: string, events: TraceEvent[]): TraceRunSummary {
   const runCompleted = [...events].reverse().find((event) => event.type === "run_completed");
   const runFailed = [...events].reverse().find((event) => event.type === "run_failed");
   const runAborted = [...events].reverse().find((event) => event.type === "run_aborted");
+  const workflowStarted = events.find((event) => event.type === "workflow_started");
+  const workflowCompleted = [...events].reverse().find((event) => event.type === "workflow_completed");
+  const workflowFailed = [...events].reverse().find((event) => event.type === "workflow_failed");
 
   return {
     runId,
-    sessionId: runStarted && "sessionId" in runStarted ? runStarted.sessionId : undefined,
-    status: runFailed ? "failed" : runAborted ? "aborted" : runCompleted ? "completed" : "running",
+    sessionId: sessionIdFromEvent(runStarted) ?? sessionIdFromEvent(workflowStarted) ?? sessionIdFromEvent(workflowFailed),
+    status: runFailed || workflowFailed ? "failed" : runAborted ? "aborted" : runCompleted || workflowCompleted ? "completed" : "running",
     startedAt: first.timestamp,
     updatedAt: last.timestamp,
-    inputPreview: runStarted && "input" in runStarted ? previewText(runStarted.input) : undefined,
-    durationMs: runCompleted && "durationMs" in runCompleted ? runCompleted.durationMs : undefined,
+    inputPreview: runStarted && "input" in runStarted
+      ? previewText(runStarted.input)
+      : workflowStarted && "workflowName" in workflowStarted
+        ? previewText(workflowStarted.workflowName)
+        : undefined,
+    durationMs: runCompleted && "durationMs" in runCompleted
+      ? runCompleted.durationMs
+      : workflowCompleted && "durationMs" in workflowCompleted
+        ? workflowCompleted.durationMs
+        : undefined,
     lastEventType: last.type,
   };
+}
+
+function sessionIdFromEvent(event: TraceEvent | undefined): string | undefined {
+  if (event && "sessionId" in event && typeof event.sessionId === "string") {
+    return event.sessionId;
+  }
+  return undefined;
 }
 
 function previewText(text: string): string {

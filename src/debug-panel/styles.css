@@ -233,6 +233,9 @@ input {
   background: transparent;
   box-shadow: none;
   color: var(--muted-strong);
+  font-size: inherit;
+  font-weight: inherit;
+  line-height: 1.25;
   padding: 0 12px;
   text-align: left;
 }
@@ -245,6 +248,12 @@ input {
 .custom-select-menu button.selected {
   background: linear-gradient(90deg, rgba(88, 166, 255, 0.28), rgba(88, 166, 255, 0.12));
   color: var(--fg-strong);
+}
+
+.resource-select .custom-select-trigger span,
+.resource-select .custom-select-menu button {
+  font-size: 13px;
+  font-weight: 650;
 }
 
 textarea::placeholder,
@@ -648,7 +657,7 @@ select:focus {
 
 .resource-tabs {
   display: inline-grid;
-  grid-template-columns: repeat(4, auto);
+  grid-template-columns: repeat(5, auto);
   gap: 3px;
   border: 1px solid var(--line-strong);
   border-radius: 7px;
