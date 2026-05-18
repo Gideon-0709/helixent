@@ -67,6 +67,15 @@ class PriorAssistantProvider implements ModelProvider {
 }
 
 describe("createDebugAgentService", () => {
+  test("serves health checks", async () => {
+    const service = createDebugAgentService();
+
+    const response = await service.fetch(new Request("http://localhost/api/health"));
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ok: true, service: "helixent-debug-agent" });
+  });
+
   test("starts a run and exposes trace events", async () => {
     const service = createDebugAgentService({
       createAgent: async () =>

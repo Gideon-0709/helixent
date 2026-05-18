@@ -1,0 +1,35 @@
+services:
+  helixent:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    image: helixent:local
+    container_name: helixent-debug-agent
+    ports:
+      - "${HELIXENT_HOST_PORT:-3002}:3001"
+    environment:
+      NODE_ENV: production
+      PORT: 3001
+      ARK_BASE_URL: ${ARK_BASE_URL:-}
+      ARK_API_KEY: ${ARK_API_KEY:-}
+      ARK_MODEL: ${ARK_MODEL:-}
+      DEEPSEEK_API_KEY: ${DEEPSEEK_API_KEY:-}
+      DEEPSEEK_BASE_URL: ${DEEPSEEK_BASE_URL:-}
+      DEEPSEEK_MODEL: ${DEEPSEEK_MODEL:-}
+    volumes:
+      - ../../skills:/app/skills
+      - ../../workflows:/app/workflows
+      - ../../.helixent:/app/.helixent
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "bun",
+          "-e",
+          "const r = await fetch('http://127.0.0.1:3001/api/health'); if (!r.ok) process.exit(1)",
+        ]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped

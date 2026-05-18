@@ -79,6 +79,10 @@ export function createDebugAgentService({
     fetch: async (request) => {
       const url = new URL(request.url);
 
+      if (request.method === "GET" && url.pathname === "/api/health") {
+        return jsonResponse({ ok: true, service: "helixent-debug-agent" });
+      }
+
       if (request.method === "POST" && url.pathname === "/api/agent/runs") {
         const body = await readJson<{ agentType?: unknown; message?: string; sessionId?: string }>(request);
         const message = body.message?.trim();

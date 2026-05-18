@@ -1,0 +1,14 @@
+.git
+.helixent
+.DS_Store
+.env
+.env.*
+.bun-cache
+coverage
+dist
+logs
+node_modules
+out
+*.log
+*.tgz
+*.tsbuildinfo
