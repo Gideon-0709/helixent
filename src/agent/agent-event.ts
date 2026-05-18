@@ -1,7 +1,6 @@
 import type { AssistantMessage, ToolMessage } from "@/foundation";
 
-/** Discriminator values for {@link AgentEvent.type}. */
-export type AgentEventType = "message" | "progress";
+import type { TraceEventInput } from "./trace";
 
 /** Discriminator values for {@link AgentProgressEvent.subtype}. */
 export type AgentProgressSubtype = "thinking" | "tool";
@@ -41,5 +40,11 @@ export interface AgentProgressToolEvent {
 /** Union of all progress events; narrow on `subtype`. */
 export type AgentProgressEvent = AgentProgressThinkingEvent | AgentProgressToolEvent;
 
+/** Agent runtime events emitted directly by the ReAct loop. */
+export type AgentRuntimeEvent = TraceEventInput;
+
+/** Discriminator values for {@link AgentEvent.type}. */
+export type AgentEventType = AgentMessageEvent["type"] | AgentProgressEvent["type"] | AgentRuntimeEvent["type"];
+
 /** Union of all agent events; narrow on `type`, then on `subtype`. */
-export type AgentEvent = AgentMessageEvent | AgentProgressEvent;
+export type AgentEvent = AgentMessageEvent | AgentProgressEvent | AgentRuntimeEvent;

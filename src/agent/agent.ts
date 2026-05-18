@@ -142,28 +142,69 @@ export class Agent {
       throw new Error("Agent is already streaming");
     }
 
+    const runStartedAt = Date.now();
     this._abortController = new AbortController();
     this._appendMessage(message);
-    await this._beforeAgentRun();
     this._streaming = true;
     try {
+      yield {
+        type: "run_started",
+        input: userMessageText(message),
+        agentName: this.name,
+      };
+      await this._beforeAgentRun();
+      yield { type: "prompt_loaded", prompt: this.prompt };
+      yield {
+        type: "skills_loaded",
+        skills: (this._context.skills ?? []).map((skill) => ({
+          name: skill.name,
+          description: skill.description,
+          path: skill.path,
+        })),
+      };
+      yield {
+        type: "tools_registered",
+        tools: (this.tools ?? []).map((tool) => ({ name: tool.name, description: tool.description })),
+      };
       for (let step = 1; step <= this.options.maxSteps; step++) {
+        const stepStartedAt = Date.now();
         this._abortController.signal.throwIfAborted();
         await this._beforeAgentStep(step);
-        const assistantMessage = yield* this._think();
+        yield { type: "step_started", step };
+        const assistantMessage = yield* this._think(step);
         await this._afterModel(assistantMessage);
+        yield { type: "assistant_message", step, message: assistantMessage };
         yield { type: "message", message: assistantMessage };
 
         const toolUses = this._extractToolUses(assistantMessage);
         if (toolUses.length === 0) {
+          const finalText = assistantMessageText(assistantMessage);
+          if (finalText) {
+            yield { type: "final_answer", text: finalText };
+          }
           await this._afterAgentRun();
+          yield { type: "step_completed", step, durationMs: Date.now() - stepStartedAt };
+          yield { type: "run_completed", durationMs: Date.now() - runStartedAt };
           return;
         }
 
-        yield* this._act(toolUses);
+        yield* this._act(step, toolUses);
         await this._afterAgentStep(step);
+        yield { type: "step_completed", step, durationMs: Date.now() - stepStartedAt };
       }
       throw new Error("Maximum number of steps reached");
+    } catch (error) {
+      if (isAbortError(error)) {
+        yield { type: "run_aborted", reason: error instanceof Error ? error.message : String(error) };
+      } else {
+        yield {
+          type: "run_failed",
+          error: {
+            message: error instanceof Error ? error.message : String(error),
+          },
+        };
+      }
+      throw error;
     } finally {
       this._streaming = false;
       this._abortController = null;
@@ -177,7 +218,7 @@ export class Agent {
     this._abortController?.abort();
   }
 
-  private async *_think(): AsyncGenerator<AgentEvent, AssistantMessage> {
+  private async *_think(step: number): AsyncGenerator<AgentEvent, AssistantMessage> {
     const modelContext: ModelContext = {
       prompt: this.prompt,
       messages: this.messages,
@@ -187,6 +228,8 @@ export class Agent {
     await this._beforeModel(modelContext);
 
     let latest: AssistantMessage | null = null;
+    const modelStartedAt = Date.now();
+    yield { type: "model_started", step, model: this.model.name };
     for await (const snapshot of this.model.stream(modelContext)) {
       latest = snapshot;
       if (snapshot.streaming) {
@@ -201,6 +244,16 @@ export class Agent {
       delete latest.streaming;
     }
     this._appendMessage(latest);
+    yield { type: "model_completed", step, durationMs: Date.now() - modelStartedAt };
+    if (latest.usage) {
+      yield {
+        type: "token_usage",
+        step,
+        promptTokens: latest.usage.promptTokens,
+        completionTokens: latest.usage.completionTokens,
+        totalTokens: latest.usage.totalTokens,
+      };
+    }
     return latest;
   }
 
@@ -219,22 +272,42 @@ export class Agent {
     return message.content.filter((content): content is ToolUseContent => content.type === "tool_use");
   }
 
-  private async *_act(toolUses: ToolUseContent[]): AsyncGenerator<AgentEvent> {
+  private async *_act(step: number, toolUses: ToolUseContent[]): AsyncGenerator<AgentEvent> {
     const signal = this._abortController?.signal;
     const pending = toolUses.map(async (toolUse, index) => {
+      const toolStartedAt = Date.now();
       try {
         const tool = this.tools?.find((t) => t.name === toolUse.name);
         if (!tool) throw new Error(`Tool ${toolUse.name} not found`);
         const beforeResult = await this._beforeToolUse(toolUse);
         if (beforeResult.skip) {
-          return { index, toolUseId: toolUse.id, toolName: toolUse.name, result: beforeResult.result };
+          return {
+            index,
+            toolUseId: toolUse.id,
+            toolName: toolUse.name,
+            result: beforeResult.result,
+            durationMs: Date.now() - toolStartedAt,
+          };
         }
         const result = await tool.invoke(toolUse.input, signal);
         await this._afterToolUse(toolUse, result);
-        return { index, toolUseId: toolUse.id, toolName: toolUse.name, result };
+        return {
+          index,
+          toolUseId: toolUse.id,
+          toolName: toolUse.name,
+          result,
+          durationMs: Date.now() - toolStartedAt,
+        };
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        return { index, toolUseId: toolUse.id, toolName: toolUse.name, result: `Error: ${message}` };
+        return {
+          index,
+          toolUseId: toolUse.id,
+          toolName: toolUse.name,
+          result: `Error: ${message}`,
+          durationMs: Date.now() - toolStartedAt,
+          error: message,
+        };
       }
     });
 
@@ -249,12 +322,41 @@ export class Agent {
       : null;
 
     const remaining = new Set(pending.map((_, i) => i));
+    for (const toolUse of toolUses) {
+      yield {
+        type: "tool_started",
+        step,
+        toolCallId: toolUse.id,
+        toolName: toolUse.name,
+        input: toolUse.input,
+      };
+    }
     while (remaining.size > 0) {
       const candidates = [...remaining].map((i) => pending[i]);
       const resolved = (await (abortPromise
         ? Promise.race([...candidates, abortPromise])
         : Promise.race(candidates)))!;
       remaining.delete(resolved.index);
+
+      if (resolved.error) {
+        yield {
+          type: "tool_failed",
+          step,
+          toolCallId: resolved.toolUseId,
+          toolName: resolved.toolName,
+          durationMs: resolved.durationMs,
+          error: { message: resolved.error },
+        };
+      } else {
+        yield {
+          type: "tool_completed",
+          step,
+          toolCallId: resolved.toolUseId,
+          toolName: resolved.toolName,
+          durationMs: resolved.durationMs,
+          result: resolved.result,
+        };
+      }
 
       const toolMessage: ToolMessage = {
         role: "tool",
@@ -267,6 +369,7 @@ export class Agent {
         ],
       };
       this._appendMessage(toolMessage);
+      yield { type: "tool_result_message", step, message: toolMessage };
       yield { type: "message", message: toolMessage };
     }
   }
@@ -360,3 +463,21 @@ export class Agent {
   }
 }
 
+function userMessageText(message: UserMessage): string {
+  return message.content
+    .map((content) => (content.type === "text" ? content.text : "[image]"))
+    .join("\n");
+}
+
+function assistantMessageText(message: AssistantMessage): string {
+  return message.content
+    .filter((content) => content.type === "text")
+    .map((content) => content.text)
+    .join("\n");
+}
+
+function isAbortError(error: unknown): boolean {
+  if (error instanceof DOMException && error.name === "AbortError") return true;
+  if (error instanceof Error && error.name === "AbortError") return true;
+  return false;
+}
