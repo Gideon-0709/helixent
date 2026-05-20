@@ -4,6 +4,7 @@ import {
   useRef,
   useState,
   type CSSProperties,
+  type FormEvent,
   type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
   type UIEvent,
@@ -42,7 +43,17 @@ interface SelectedResource {
   id: string;
 }
 
+type AuthStatus = "checking" | "authenticated" | "anonymous";
+
+interface LoginCredentials {
+  username: string;
+  password: string;
+}
+
 export function App() {
+  const [authStatus, setAuthStatus] = useState<AuthStatus>("checking");
+  const [authUsername, setAuthUsername] = useState<string | null>(null);
+  const [authError, setAuthError] = useState("");
   const [resources, setResources] = useState<ResourceMap>(() => cloneDefaultResources());
   const [savedResources, setSavedResources] = useState<ResourceMap>(() => cloneDefaultResources());
   const [selectedResource, setSelectedResource] = useState<SelectedResource>({ type: "prompt", id: "system" });
@@ -96,10 +107,15 @@ export function App() {
   const tokenStats = subtractTokenStats(rawTokenStats, tokenStatsBaseline);
 
   useEffect(() => {
+    void checkAuth();
+  }, []);
+
+  useEffect(() => {
+    if (authStatus !== "authenticated") return;
     void loadResources();
     void loadSessions();
     void loadRuns();
-  }, []);
+  }, [authStatus]);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -121,6 +137,7 @@ export function App() {
   }, [selectedSessionId, runs]);
 
   useEffect(() => {
+    if (authStatus !== "authenticated") return;
     const source = new EventSource("/api/internal/events/live");
     source.onopen = () => setConnectionStatus("Live trace connected");
     source.onerror = () => setConnectionStatus("Live trace reconnecting...");
@@ -134,10 +151,56 @@ export function App() {
       void loadSessions();
     };
     return () => source.close();
-  }, []);
+  }, [authStatus]);
+
+  async function checkAuth() {
+    const response = await fetch("/api/auth/me");
+    if (!response.ok) {
+      setAuthStatus("anonymous");
+      setConnectionStatus("Signed out");
+      return;
+    }
+    const payload = (await response.json()) as { username?: string };
+    setAuthUsername(payload.username ?? null);
+    setAuthStatus("authenticated");
+  }
+
+  async function handleLogin({ username, password }: LoginCredentials) {
+    setAuthError("");
+    const response = await fetch("/api/auth/login", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ username, password }),
+    });
+    const payload = (await response.json()) as { error?: string; username?: string };
+    if (!response.ok) {
+      setAuthError(payload.error ?? "Login failed");
+      return;
+    }
+    setAuthUsername(payload.username ?? username);
+    setAuthStatus("authenticated");
+    setConnectionStatus("Connecting...");
+  }
+
+  async function handleLogout() {
+    await fetch("/api/auth/logout", { method: "POST" });
+    setAuthUsername(null);
+    setAuthStatus("anonymous");
+    setConnectionStatus("Signed out");
+  }
+
+  async function panelFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+    const response = await fetch(input, init);
+    if (response.status === 401) {
+      setAuthUsername(null);
+      setAuthStatus("anonymous");
+      setConnectionStatus("Signed out");
+    }
+    return response;
+  }
 
   async function loadResources({ updateStatus = true }: { updateStatus?: boolean } = {}) {
-    const response = await fetch("/api/internal/resources");
+    const response = await panelFetch("/api/internal/resources");
     if (!response.ok) {
       if (updateStatus) {
         setEditorStatus("Resource API unavailable");
@@ -157,7 +220,7 @@ export function App() {
   }
 
   async function refreshArchiveResources() {
-    const response = await fetch("/api/internal/resources");
+    const response = await panelFetch("/api/internal/resources");
     if (!response.ok) return;
     const nextResources = (await response.json()) as ResourceMap;
     setResources((current) => ({ ...current, archive: nextResources.archive }));
@@ -165,7 +228,7 @@ export function App() {
   }
 
   async function loadSessions() {
-    const response = await fetch("/api/internal/sessions");
+    const response = await panelFetch("/api/internal/sessions");
     if (!response.ok) return;
     const payload = await response.json();
     const serverSessions = Array.isArray(payload) ? (payload as PanelSessionSummary[]) : [];
@@ -192,7 +255,7 @@ export function App() {
     if (!deletedSession.draft && !window.confirm(`Delete "${deletedSession.title}" and release its trace events?`)) return;
 
     if (!deletedSession.draft) {
-      const response = await fetch(`/api/internal/sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE" });
+      const response = await panelFetch(`/api/internal/sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE" });
       if (!response.ok) return;
     }
 
@@ -226,7 +289,7 @@ export function App() {
   async function handleArchiveSession(sessionId: string) {
     const archivedSession = sessions.find((session) => session.id === sessionId);
     if (!archivedSession || archivedSession.draft) return;
-    const response = await fetch(`/api/internal/sessions/${encodeURIComponent(sessionId)}/archive`, { method: "POST" });
+    const response = await panelFetch(`/api/internal/sessions/${encodeURIComponent(sessionId)}/archive`, { method: "POST" });
     if (!response.ok) {
       setEditorStatus("Archive failed");
       return;
@@ -239,7 +302,7 @@ export function App() {
     if (runs.length === 0 && visibleSessionList.length === 0) return;
     if (!window.confirm("Clear all agents, runs, and trace events from memory?")) return;
 
-    const response = await fetch("/api/internal/sessions", { method: "DELETE" });
+    const response = await panelFetch("/api/internal/sessions", { method: "DELETE" });
     if (!response.ok) return;
 
     setSessions([]);
@@ -259,14 +322,15 @@ export function App() {
   }
 
   async function loadRuns() {
-    const response = await fetch("/api/internal/runs");
+    const response = await panelFetch("/api/internal/runs");
+    if (!response.ok) return;
     const nextRuns = (await response.json()) as RunSummary[];
     setRuns(nextRuns);
     setRunSessionIds((current) => mergeRunSessionIds(current, nextRuns));
   }
 
   async function loadRunEvents(runId: string): Promise<PanelTraceEvent[]> {
-    const response = await fetch(`/api/internal/runs/${encodeURIComponent(runId)}/events`);
+    const response = await panelFetch(`/api/internal/runs/${encodeURIComponent(runId)}/events`);
     if (!response.ok) return [];
     const events = (await response.json()) as PanelTraceEvent[];
     const sessionEvent = events.find((event) => typeof event.sessionId === "string");
@@ -283,12 +347,13 @@ export function App() {
     const selectedSession = selectedSessionId ? sessions.find((session) => session.id === selectedSessionId) : undefined;
     const sessionId = selectedSessionId && !isDraftSessionId(selectedSessionId) ? selectedSessionId : undefined;
     const agentType = selectedSession?.agentType ?? newAgentType;
-    const response = await fetch("/api/agent/runs", {
+    const response = await panelFetch("/api/agent/runs", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ agentType, message: trimmed, sessionId }),
     });
     const payload = (await response.json()) as { runId: string; sessionId: string };
+    if (!response.ok) return;
     setSelectedRunId(null);
     setSelectedSessionId(payload.sessionId);
     if (isDraftSessionId(selectedSessionId)) {
@@ -353,7 +418,7 @@ export function App() {
   }
 
   async function startWorkflowRequest(session: PanelSessionSummary) {
-    const response = await fetch("/api/workflows/runs", {
+    const response = await panelFetch("/api/workflows/runs", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -367,7 +432,7 @@ export function App() {
   }
 
   async function createServerSession(session: PanelSessionSummary): Promise<PanelSessionSummary | null> {
-    const response = await fetch("/api/internal/sessions", {
+    const response = await panelFetch("/api/internal/sessions", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({
@@ -443,7 +508,7 @@ export function App() {
 
   async function handleCreateResource() {
     const name = newResourceName.trim() || `New ${newType} ${resources[newType].length + 1}`;
-    const response = await fetch("/api/internal/resources", {
+    const response = await panelFetch("/api/internal/resources", {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ type: newType, name }),
@@ -467,7 +532,7 @@ export function App() {
     if (!window.confirm(`Delete "${selected.name}"?`)) return;
     const { type, id } = selectedResource;
     const currentIndex = resources[type].findIndex((resource) => resource.id === id);
-    const response = await fetch(`/api/internal/resources/${encodeURIComponent(type)}/${encodeURIComponent(id)}`, { method: "DELETE" });
+    const response = await panelFetch(`/api/internal/resources/${encodeURIComponent(type)}/${encodeURIComponent(id)}`, { method: "DELETE" });
     if (!response.ok) {
       const payload = (await response.json()) as { error?: string };
       setEditorStatus(payload.error ?? "Delete failed");
@@ -489,7 +554,7 @@ export function App() {
     if (!selected || !isDirty || isReadOnlyResource || isSavingResource) return;
     setIsSavingResource(true);
     try {
-      const response = await fetch(
+      const response = await panelFetch(
         `/api/internal/resources/${encodeURIComponent(selectedResource.type)}/${encodeURIComponent(selectedResource.id)}`,
         {
           method: "PUT",
@@ -538,12 +603,33 @@ export function App() {
     }
   }
 
+  if (authStatus === "checking") {
+    return (
+      <div className="auth-screen">
+        <div className="auth-panel">
+          <h1>Helixent Debug Panel</h1>
+          <p>Checking session...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (authStatus === "anonymous") {
+    return <LoginPanel error={authError} onSubmit={handleLogin} />;
+  }
+
   return (
     <div className="shell">
       <header className="topbar">
         <div className="brand">
           <h1>Helixent Debug Panel</h1>
           <span>{connectionStatus}</span>
+        </div>
+        <div className="topbar-actions">
+          <span className="auth-user">{authUsername ?? "Signed in"}</span>
+          <button type="button" onClick={() => void handleLogout()}>
+            Sign out
+          </button>
         </div>
       </header>
 
@@ -784,6 +870,55 @@ export function App() {
           </div>
         </aside>
       </div>
+    </div>
+  );
+}
+
+function LoginPanel({ error, onSubmit }: { error: string; onSubmit: (_credentials: LoginCredentials) => Promise<void> }) {
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (isSubmitting) return;
+    setIsSubmitting(true);
+    try {
+      await onSubmit({ username, password });
+    } finally {
+      setIsSubmitting(false);
+    }
+  }
+
+  return (
+    <div className="auth-screen">
+      <form className="auth-panel" onSubmit={(event) => void handleSubmit(event)}>
+        <div className="auth-brand">
+          <h1>Helixent Debug Panel</h1>
+          <span>Sign in</span>
+        </div>
+        <label>
+          <span>Username</span>
+          <input
+            autoComplete="username"
+            value={username}
+            onChange={(event) => setUsername(event.target.value)}
+          />
+        </label>
+        <label>
+          <span>Password</span>
+          <input
+            autoComplete="current-password"
+            type="password"
+            value={password}
+            onChange={(event) => setPassword(event.target.value)}
+          />
+        </label>
+        {error ? <div className="auth-error">{error}</div> : null}
+        <button type="submit" className="primary" disabled={isSubmitting || !username.trim() || !password}>
+          {isSubmitting ? "Signing in..." : "Sign in"}
+        </button>
+      </form>
     </div>
   );
 }

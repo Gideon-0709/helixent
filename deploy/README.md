@@ -23,6 +23,18 @@ Check health:
 curl http://localhost:3002/api/health
 ```
 
+The web panel requires a login. The default account is:
+
+```text
+admin / admin
+```
+
+Add more users in `deploy/compose/.env`:
+
+```env
+HELIXENT_WEB_USERS=alice:alice-password,bob:bob-password
+```
+
 Stop:
 
 ```bash

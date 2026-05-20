@@ -1,9 +1,11 @@
 import debugPanel from "../debug-panel/index.html";
 
 import { createDebugAgentService } from "./debug-agent-service";
+import { createWebAuth } from "./web-auth";
 
 const port = Number(Bun.env.PORT ?? 3001);
 const service = createDebugAgentService();
+const auth = createWebAuth({ handleAuthorized: service.fetch });
 
 Bun.serve({
   port,
@@ -12,7 +14,7 @@ Bun.serve({
     "/": debugPanel,
     "/internal/debug": debugPanel,
   },
-  fetch: service.fetch,
+  fetch: auth.fetch,
   development: Bun.env.NODE_ENV !== "production",
 });
 

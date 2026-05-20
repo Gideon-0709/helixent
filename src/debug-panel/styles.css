@@ -322,6 +322,89 @@ select:focus {
   box-shadow: 0 0 12px rgba(63, 185, 80, 0.76);
 }
 
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.auth-user {
+  max-width: 180px;
+  overflow: hidden;
+  color: var(--muted-strong);
+  font-size: 13px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.auth-screen {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.025) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.025) 1px, transparent 1px);
+  background-size: 32px 32px;
+}
+
+.auth-panel {
+  width: min(380px, 100%);
+  display: grid;
+  gap: 16px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: rgba(13, 17, 23, 0.96);
+  padding: 24px;
+  box-shadow: var(--shadow);
+}
+
+.auth-brand {
+  display: grid;
+  gap: 4px;
+}
+
+.auth-panel h1 {
+  margin: 0;
+  color: var(--fg-strong);
+  font-size: 22px;
+  line-height: 1.2;
+}
+
+.auth-panel p,
+.auth-brand span {
+  margin: 0;
+  color: var(--muted-strong);
+  font-size: 13px;
+}
+
+.auth-panel label {
+  display: grid;
+  gap: 7px;
+  color: var(--muted-strong);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.auth-panel input {
+  min-height: 38px;
+  padding: 0 11px;
+}
+
+.auth-panel button {
+  min-height: 38px;
+}
+
+.auth-error {
+  border: 1px solid rgba(248, 81, 73, 0.38);
+  border-radius: 6px;
+  background: var(--red-soft);
+  color: var(--red);
+  font-size: 13px;
+  padding: 9px 10px;
+}
+
 .new-menu {
   position: absolute;
   top: calc(100% + 8px);
