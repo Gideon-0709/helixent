@@ -1,22 +1,236 @@
-# Helixent API Contract
+# Helixent Main-System API Contract
 
-This document describes the lightweight main-system API layer. The debug panel still uses the existing web login and internal APIs.
+This contract defines the `/api/v1` HTTP API used by the main system to call Helixent AI agent services.
 
-## Authentication
+## 1. Protocol
 
-Main-system calls use bearer API keys configured with `HELIXENT_API_KEYS`.
+| Item | Value |
+| --- | --- |
+| Base URL | Provided by deployment, for example `http://ai-service:3002` |
+| API version | `v1` |
+| Request body | JSON |
+| Response body | JSON |
+| Time format | ISO 8601 string |
+| Public endpoints | `GET /api/health`, `GET /api/v1/health` |
+| Protected endpoints | All other `/api/v1/*` endpoints |
+
+Requests with JSON bodies should include:
+
+```http
+Content-Type: application/json
+```
+
+## 2. Authentication
+
+Protected endpoints require a bearer API key configured on the Helixent service with `HELIXENT_API_KEYS`.
 
 ```http
 Authorization: Bearer <api-key>
 ```
 
-`GET /api/health` and `GET /api/v1/health` are public. All other `/api/v1/*` routes require a valid bearer token.
-
-## Status
+Missing or invalid API key:
 
 ```http
-GET /api/v1/status
+401 Unauthorized
 ```
+
+```json
+{
+  "error": "valid api key is required"
+}
+```
+
+## 3. Common Types
+
+### 3.1 IDs
+
+| Field | Type | Description |
+| --- | --- | --- |
+| `conversationId` | string | Helixent-generated conversation id. Current format starts with `session_`. |
+| `externalConversationId` | string | Main-system conversation id. Optional. The main system should treat this as unique. |
+| `runId` | string | Helixent-generated run id. Current format starts with `run_`. |
+| `requestId` | string | Main-system request id. Optional. Use it for idempotency and log correlation. |
+
+### 3.2 Enums
+
+| Name | Values |
+| --- | --- |
+| `agentType` | `gma`, `rm`, `sm` |
+| `run.status` | `running`, `completed`, `failed`, `aborted` |
+| `context.status` | `normal`, `warning`, `danger` |
+| cancel response `status` | `aborting` |
+
+### 3.3 Error
+
+All API errors use this shape:
+
+```json
+{
+  "error": "conversation not found"
+}
+```
+
+Common status codes:
+
+| Status | Meaning |
+| --- | --- |
+| `200` | Request accepted or completed. |
+| `400` | Invalid request body or unsupported operation. |
+| `401` | Missing or invalid authentication. |
+| `404` | Resource not found. |
+
+Common error messages:
+
+| Error | Typical Cause |
+| --- | --- |
+| `valid api key is required` | Missing or invalid bearer token. |
+| `message is required` | Message request body has no non-empty `message`. |
+| `agent not found` | Unknown `agentType`. |
+| `conversation not found` | Unknown `conversationId` or `externalConversationId`. |
+| `agentType cannot be changed for an existing conversation` | `PATCH` attempted to switch an existing conversation to another agent. |
+| `run not found` | Unknown `runId`. |
+| `run input not found` | Retry target has no recorded input. |
+| `run is not running` | Cancel target is not active. |
+
+### 3.4 Pagination
+
+List endpoints support cursor pagination.
+
+| Query | Type | Required | Description |
+| --- | --- | --- | --- |
+| `limit` | number | no | Page size. Default `50`, maximum `100`. |
+| `cursor` | string | no | Cursor from the previous response's `nextCursor`. Treat it as opaque. |
+
+If more data exists, the response includes `nextCursor`. If there is no next page, `nextCursor` is omitted.
+
+```json
+{
+  "nextCursor": "20"
+}
+```
+
+### 3.5 Conversation
+
+```ts
+type Conversation = {
+  id: string;
+  title: string;
+  agentType: "gma" | "rm" | "sm";
+  createdAt: string;
+  updatedAt: string;
+  context?: Record<string, unknown>;
+  externalConversationId?: string;
+  metadata?: Record<string, unknown>;
+  active: boolean;
+  runCount: number;
+};
+```
+
+| Field | Description |
+| --- | --- |
+| `context` | Business context stored with the conversation. Used by the main system for correlation and by Helixent as optional context. |
+| `metadata` | Caller-defined metadata. Helixent stores and returns it without interpreting it. |
+| `active` | Whether an agent instance has been created for this conversation in the current service process. |
+| `runCount` | Number of runs started for this conversation in the current service process. |
+
+### 3.6 Run
+
+```ts
+type Run = {
+  runId: string;
+  sessionId?: string;
+  conversationId?: string;
+  requestId?: string;
+  status: "running" | "completed" | "failed" | "aborted";
+  startedAt: string;
+  updatedAt: string;
+  inputPreview?: string;
+  durationMs?: number;
+  context?: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
+  lastEventType: string;
+};
+```
+
+### 3.7 Message
+
+```ts
+type Message = {
+  role: "user" | "assistant";
+  content: string;
+  runId: string;
+  requestId?: string;
+  timestamp: string;
+};
+```
+
+### 3.8 ContextStatus
+
+```ts
+type ContextStatus = {
+  conversationId: string;
+  enabled: boolean;
+  maxMessagesBeforeCompact: number;
+  keepRecentMessages: number;
+  maxSummaryCharacters: number;
+  messageCount: number;
+  percent: number;
+  status: "normal" | "warning" | "danger";
+  summaryActive: boolean;
+  summaryPreview?: string;
+  compactedCount: number;
+  lastCompactedAt?: string;
+};
+```
+
+### 3.9 UserSafeRunEvent
+
+`GET /api/v1/runs/:runId/events` and SSE streams expose user-safe events, not raw internal trace events.
+
+Common fields:
+
+```ts
+type UserSafeRunEvent = {
+  id: string;
+  runId: string;
+  type: string;
+  timestamp: string;
+  sequence: number;
+};
+```
+
+Supported event types in v1:
+
+| Event Type | Extra Fields |
+| --- | --- |
+| `run_started` | `input`, `agentName?`, `sessionId?` |
+| `final_answer` | `text` |
+| `context_compacted` | `previousMessageCount`, `currentMessageCount`, `compactedMessageCount`, `keptMessageCount`, `summaryPreview?` |
+| `run_completed` | `durationMs` |
+| `run_failed` | `error.message` |
+| `run_aborted` | `reason?` |
+
+## 4. Endpoint Reference
+
+### 4.1 Health and Status
+
+#### `GET /api/v1/health`
+
+Public health check.
+
+Response:
+
+```json
+{
+  "ok": true,
+  "service": "helixent-debug-agent",
+  "version": "v1"
+}
+```
+
+#### `GET /api/v1/status`
+
+Returns service runtime status.
 
 Response:
 
@@ -47,55 +261,11 @@ Response:
 }
 ```
 
-## Pagination
+### 4.2 Agents
 
-List endpoints use lightweight cursor pagination. `cursor` is an opaque value returned by the previous response.
+#### `GET /api/v1/agents`
 
-Supported query parameters:
-
-- `limit`: optional page size. Defaults to `50`, maximum `100`.
-- `cursor`: optional cursor returned as `nextCursor` from the previous page.
-
-Example:
-
-```http
-GET /api/v1/conversations?limit=20
-GET /api/v1/conversations?limit=20&cursor=20
-```
-
-If more data is available, the response includes `nextCursor`. If there is no next page, `nextCursor` is omitted.
-
-## Conversation Context
-
-Helixent keeps conversation history inside the AI agent service. The main system sends the current message and optional business context; it does not need to resend the full transcript on every request.
-
-Long conversations are compacted automatically using a rolling summary buffer, following the same lightweight pattern used by projects such as [LangChain `ConversationSummaryBufferMemory`](https://api.python.langchain.com/en/latest/_modules/langchain/memory/summary_buffer.html) and [LlamaIndex `ChatSummaryMemoryBuffer`](https://developers.llamaindex.ai/python/examples/agent/memory/summary_memory_buffer/): older transcript messages become one durable summary, while the newest messages remain in full detail.
-
-Default server policy:
-
-```json
-{
-  "mode": "summary_buffer",
-  "maxMessagesBeforeCompact": 24,
-  "keepRecentMessages": 8,
-  "maxSummaryCharacters": 4000
-}
-```
-
-Deployment can override this with:
-
-```env
-HELIXENT_CONTEXT_COMPACTION=on
-HELIXENT_CONTEXT_MAX_MESSAGES=24
-HELIXENT_CONTEXT_KEEP_RECENT_MESSAGES=8
-HELIXENT_CONTEXT_MAX_SUMMARY_CHARS=4000
-```
-
-## Agents
-
-```http
-GET /api/v1/agents
-```
+Lists supported built-in agents.
 
 Response:
 
@@ -112,13 +282,13 @@ Response:
 }
 ```
 
-Supported `agentType` values are `gma`, `rm`, and `sm`.
+#### `GET /api/v1/agents/:agentType`
 
-Get one supported agent profile:
+Path params:
 
-```http
-GET /api/v1/agents/:agentType
-```
+| Name | Type | Required | Description |
+| --- | --- | --- | --- |
+| `agentType` | enum | yes | One of `gma`, `rm`, `sm`. |
 
 Response:
 
@@ -133,30 +303,20 @@ Response:
 }
 ```
 
-Unknown `agentType` returns `404`.
+### 4.3 Conversations
 
-## Conversations
+#### `GET /api/v1/conversations`
 
-List conversations currently known to Helixent:
+Query params:
 
-```http
-GET /api/v1/conversations
-```
-
-Supported filters:
-
-- `limit`
-- `cursor`
-- `agentType`: `gma`, `rm`, or `sm`
-- `externalConversationId`
-- `createdAfter`: ISO timestamp
-- `createdBefore`: ISO timestamp
-
-Example:
-
-```http
-GET /api/v1/conversations?agentType=rm&externalConversationId=main-conv-123&limit=20
-```
+| Name | Type | Required | Description |
+| --- | --- | --- | --- |
+| `limit` | number | no | Page size. |
+| `cursor` | string | no | Cursor from previous page. |
+| `agentType` | enum | no | Filter by agent type. |
+| `externalConversationId` | string | no | Filter by main-system conversation id. |
+| `createdAfter` | string | no | ISO timestamp. Returns conversations created after this time. |
+| `createdBefore` | string | no | ISO timestamp. Returns conversations created before this time. |
 
 Response:
 
@@ -169,6 +329,7 @@ Response:
       "agentType": "gma",
       "createdAt": "2026-05-22T00:00:00.000Z",
       "updatedAt": "2026-05-22T00:00:01.000Z",
+      "externalConversationId": "main-conv-123",
       "context": {
         "tenantId": "tenant-1"
       },
@@ -183,33 +344,19 @@ Response:
 }
 ```
 
-Create a conversation:
+#### `POST /api/v1/conversations`
 
-```http
-POST /api/v1/conversations
-```
+Creates a conversation.
 
-Request:
+Request body:
 
-```json
-{
-  "agentType": "gma",
-  "title": "Store analysis",
-  "externalConversationId": "main-conv-123",
-  "context": {
-    "tenantId": "tenant-1",
-    "userId": "user-1",
-    "role": "manager",
-    "storeId": "store-1",
-    "regionId": "region-1",
-    "timezone": "Asia/Shanghai",
-    "locale": "zh-CN"
-  },
-  "metadata": {
-    "channel": "main-system"
-  }
-}
-```
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `agentType` | enum | no | Defaults to `gma`. |
+| `title` | string | no | Defaults to the agent display name. |
+| `externalConversationId` | string | no | Main-system conversation id. |
+| `context` | object | no | Business context. |
+| `metadata` | object | no | Caller-defined metadata. |
 
 Response:
 
@@ -224,13 +371,7 @@ Response:
     "updatedAt": "2026-05-22T00:00:00.000Z",
     "externalConversationId": "main-conv-123",
     "context": {
-      "tenantId": "tenant-1",
-      "userId": "user-1",
-      "role": "manager",
-      "storeId": "store-1",
-      "regionId": "region-1",
-      "timezone": "Asia/Shanghai",
-      "locale": "zh-CN"
+      "tenantId": "tenant-1"
     },
     "metadata": {
       "channel": "main-system"
@@ -241,82 +382,27 @@ Response:
 }
 ```
 
-Get conversation details:
+#### `GET /api/v1/conversations/:conversationId`
 
-```http
-GET /api/v1/conversations/:conversationId
-```
+Returns one conversation.
 
-Response:
+#### `GET /api/v1/conversations/by-external/:externalConversationId`
 
-```json
-{
-  "conversation": {
-    "id": "session_xxx",
-    "title": "Store analysis",
-    "agentType": "gma",
-    "createdAt": "2026-05-22T00:00:00.000Z",
-    "updatedAt": "2026-05-22T00:00:00.000Z",
-    "context": {
-      "tenantId": "tenant-1",
-      "storeId": "store-1"
-    },
-    "metadata": {
-      "channel": "main-system"
-    },
-    "active": true,
-    "runCount": 1
-  }
-}
-```
+Returns one conversation by main-system id.
 
-Get conversation details by main-system id:
+#### `PATCH /api/v1/conversations/:conversationId`
 
-```http
-GET /api/v1/conversations/by-external/:externalConversationId
-```
+Updates editable conversation fields.
 
-Response:
+Request body:
 
-```json
-{
-  "conversation": {
-    "id": "session_xxx",
-    "title": "Store analysis",
-    "agentType": "gma",
-    "externalConversationId": "main-conv-123",
-    "createdAt": "2026-05-22T00:00:00.000Z",
-    "updatedAt": "2026-05-22T00:00:00.000Z",
-    "active": true,
-    "runCount": 1
-  }
-}
-```
-
-Unknown `externalConversationId` returns `404`.
-
-Update conversation metadata:
-
-```http
-PATCH /api/v1/conversations/:conversationId
-```
-
-Request:
-
-```json
-{
-  "title": "Updated store analysis",
-  "externalConversationId": "main-conv-456",
-  "context": {
-    "tenantId": "tenant-1",
-    "regionId": "region-1"
-  },
-  "metadata": {
-    "channel": "main-system",
-    "priority": "normal"
-  }
-}
-```
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `title` | string | no | New title. Empty strings are ignored. |
+| `externalConversationId` | string | no | Replaces the external id. Empty string clears it. |
+| `context` | object | no | Replaces stored context. Empty object clears it. |
+| `metadata` | object | no | Replaces stored metadata. Empty object clears it. |
+| `agentType` | enum | no | Must match the existing value if provided. It cannot be changed. |
 
 Response:
 
@@ -329,12 +415,10 @@ Response:
     "updatedAt": "2026-05-22T00:00:02.000Z",
     "externalConversationId": "main-conv-456",
     "context": {
-      "tenantId": "tenant-1",
-      "regionId": "region-1"
+      "tenantId": "tenant-1"
     },
     "metadata": {
-      "channel": "main-system",
-      "priority": "normal"
+      "channel": "main-system"
     },
     "active": true,
     "runCount": 1
@@ -342,13 +426,9 @@ Response:
 }
 ```
 
-`agentType` cannot be changed for an existing conversation. A request that tries to switch it returns `400`.
+#### `DELETE /api/v1/conversations/:conversationId`
 
-Delete conversation:
-
-```http
-DELETE /api/v1/conversations/:conversationId
-```
+Deletes the conversation from current Helixent runtime memory and removes its trace runs. If the conversation has an active run, Helixent aborts it.
 
 Response:
 
@@ -359,13 +439,11 @@ Response:
 }
 ```
 
-Deleting a conversation marks it closed in memory, removes its trace runs, and aborts its active run if one is streaming.
+### 4.4 Conversation Context
 
-Get conversation context status:
+#### `GET /api/v1/conversations/:conversationId/context`
 
-```http
-GET /api/v1/conversations/:conversationId/context
-```
+Returns context usage and compaction status.
 
 Response:
 
@@ -386,11 +464,9 @@ Response:
 }
 ```
 
-Get current context summary:
+#### `GET /api/v1/conversations/:conversationId/context/summary`
 
-```http
-GET /api/v1/conversations/:conversationId/context/summary
-```
+Returns the current context summary state.
 
 Response:
 
@@ -405,11 +481,9 @@ Response:
 }
 ```
 
-Manually compact conversation context:
+#### `POST /api/v1/conversations/:conversationId/context/compact`
 
-```http
-POST /api/v1/conversations/:conversationId/context/compact
-```
+Manually compacts the conversation context. This affects future model input and does not delete historical run records.
 
 Response:
 
@@ -425,11 +499,9 @@ Response:
 }
 ```
 
-Reset conversation context:
+#### `POST /api/v1/conversations/:conversationId/context/reset`
 
-```http
-POST /api/v1/conversations/:conversationId/context/reset
-```
+Clears the agent's current conversation context. This affects future model input and does not delete historical run records.
 
 Response:
 
@@ -444,13 +516,122 @@ Response:
 }
 ```
 
-List conversation runs:
+### 4.5 Messages
 
-```http
-GET /api/v1/conversations/:conversationId/runs
+#### `POST /api/v1/conversations/:conversationId/messages`
+
+Starts an async run in an existing conversation.
+
+Request body:
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `message` | string | yes | User input. Must be non-empty. |
+| `requestId` | string | no | Main-system request id. |
+| `callbackUrl` | string | no | Webhook URL called when the run finishes. |
+| `context` | object | no | Per-run business context. |
+| `metadata` | object | no | Per-run caller metadata. |
+
+Response:
+
+```json
+{
+  "runId": "run_xxx",
+  "conversationId": "session_xxx",
+  "status": "running"
+}
 ```
 
-Supports `limit` and `cursor`.
+#### `POST /api/v1/conversations/:conversationId/messages:run`
+
+Starts a run and waits until it finishes.
+
+Request body: same as `POST /api/v1/conversations/:conversationId/messages`.
+
+Response:
+
+```json
+{
+  "runId": "run_xxx",
+  "sessionId": "session_xxx",
+  "conversationId": "session_xxx",
+  "requestId": "main-request-123",
+  "status": "completed",
+  "startedAt": "2026-05-22T00:00:00.000Z",
+  "updatedAt": "2026-05-22T00:00:01.000Z",
+  "inputPreview": "Analyze today's store performance.",
+  "durationMs": 1000,
+  "context": {
+    "storeId": "store-1"
+  },
+  "metadata": {
+    "source": "main-system"
+  },
+  "finalAnswer": "The analysis result.",
+  "lastEventType": "run_completed"
+}
+```
+
+If the run fails after being accepted, the response is still `200` and contains `status: "failed"` plus an `error` object.
+
+#### `POST /api/v1/agent/messages`
+
+Starts an async run and creates a conversation if `conversationId` is omitted.
+
+Request body:
+
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `message` | string | yes | User input. Must be non-empty. |
+| `conversationId` | string | no | Existing Helixent conversation id. |
+| `agentType` | enum | no | Used only when creating a new conversation. Defaults to `gma`. |
+| `title` | string | no | Used only when creating a new conversation. |
+| `externalConversationId` | string | no | Used only when creating a new conversation. |
+| `requestId` | string | no | Main-system request id. |
+| `callbackUrl` | string | no | Webhook URL called when the run finishes. |
+| `context` | object | no | Conversation context for new conversations and per-run context. |
+| `metadata` | object | no | Conversation metadata for new conversations and per-run metadata. |
+
+Response:
+
+```json
+{
+  "runId": "run_xxx",
+  "conversationId": "session_xxx",
+  "status": "running"
+}
+```
+
+### 4.6 Conversation Messages and Runs
+
+#### `GET /api/v1/conversations/:conversationId/messages`
+
+Lists conversation messages derived from completed run events.
+
+Query params: `limit`, `cursor`.
+
+Response:
+
+```json
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Analyze today's store performance.",
+      "runId": "run_xxx",
+      "requestId": "main-request-123",
+      "timestamp": "2026-05-22T00:00:00.000Z"
+    }
+  ],
+  "nextCursor": "20"
+}
+```
+
+#### `GET /api/v1/conversations/:conversationId/runs`
+
+Lists runs in a conversation.
+
+Query params: `limit`, `cursor`.
 
 Response:
 
@@ -473,209 +654,15 @@ Response:
 }
 ```
 
-List conversation messages:
+### 4.7 Runs
 
-```http
-GET /api/v1/conversations/:conversationId/messages
-```
+#### `GET /api/v1/runs/:runId`
 
-Supports `limit` and `cursor`.
+Returns run metadata.
 
-Response:
+#### `GET /api/v1/runs/:runId/result`
 
-```json
-{
-  "messages": [
-    {
-      "role": "user",
-      "content": "Analyze today's store performance.",
-      "runId": "run_xxx",
-      "requestId": "main-request-123",
-      "timestamp": "2026-05-22T00:00:00.000Z"
-    },
-    {
-      "role": "assistant",
-      "content": "The analysis result.",
-      "runId": "run_xxx",
-      "requestId": "main-request-123",
-      "timestamp": "2026-05-22T00:00:01.000Z"
-    }
-  ],
-  "nextCursor": "20"
-}
-```
-
-## Messages
-
-Send a message to an existing conversation:
-
-```http
-POST /api/v1/conversations/:conversationId/messages
-```
-
-Request:
-
-```json
-{
-  "requestId": "main-request-123",
-  "message": "Analyze today's store performance.",
-  "callbackUrl": "https://main-system.example/ai/callback",
-  "context": {
-    "storeId": "store-1"
-  },
-  "metadata": {
-    "source": "main-system"
-  }
-}
-```
-
-Response:
-
-```json
-{
-  "runId": "run_xxx",
-  "conversationId": "session_xxx",
-  "status": "running"
-}
-```
-
-Send a message synchronously and wait for the final result:
-
-```http
-POST /api/v1/conversations/:conversationId/messages:run
-```
-
-Request:
-
-```json
-{
-  "requestId": "main-request-123",
-  "message": "Analyze today's store performance.",
-  "callbackUrl": "https://main-system.example/ai/callback",
-  "context": {
-    "storeId": "store-1"
-  },
-  "metadata": {
-    "source": "main-system"
-  }
-}
-```
-
-Response:
-
-```json
-{
-  "runId": "run_xxx",
-  "sessionId": "session_xxx",
-  "conversationId": "session_xxx",
-  "requestId": "main-request-123",
-  "status": "completed",
-  "startedAt": "2026-05-22T00:00:00.000Z",
-  "updatedAt": "2026-05-22T00:00:01.000Z",
-  "inputPreview": "Analyze today's store performance.",
-  "durationMs": 1000,
-  "context": {
-    "storeId": "store-1"
-  },
-  "metadata": {
-    "source": "main-system"
-  },
-  "finalAnswer": "The analysis result.",
-  "lastEventType": "run_completed"
-}
-```
-
-If the run fails, the response still uses `200` when the request was accepted, with `status: "failed"` and an `error` object in the body.
-
-Send a message and let Helixent create the conversation if `conversationId` is omitted:
-
-```http
-POST /api/v1/agent/messages
-```
-
-Request:
-
-```json
-{
-  "agentType": "gma",
-  "conversationId": "session_xxx",
-  "requestId": "main-request-123",
-  "message": "Analyze today's store performance.",
-  "callbackUrl": "https://main-system.example/ai/callback",
-  "externalConversationId": "main-conv-123",
-  "context": {
-    "tenantId": "tenant-1",
-    "userId": "user-1",
-    "role": "manager",
-    "storeId": "store-1",
-    "regionId": "region-1",
-    "timezone": "Asia/Shanghai",
-    "locale": "zh-CN"
-  },
-  "metadata": {
-    "source": "main-system"
-  }
-}
-```
-
-Response:
-
-```json
-{
-  "runId": "run_xxx",
-  "conversationId": "session_xxx",
-  "status": "running"
-}
-```
-
-If `callbackUrl` is provided on an async message request, Helixent sends a best-effort `POST` callback after the run finishes. Callback delivery failure does not change run status.
-
-Callback body:
-
-```json
-{
-  "runId": "run_xxx",
-  "sessionId": "session_xxx",
-  "conversationId": "session_xxx",
-  "requestId": "main-request-123",
-  "status": "completed",
-  "finalAnswer": "The analysis result.",
-  "lastEventType": "run_completed"
-}
-```
-
-## Runs
-
-```http
-GET /api/v1/runs/:runId
-```
-
-Response:
-
-```json
-{
-  "runId": "run_xxx",
-  "sessionId": "session_xxx",
-  "conversationId": "session_xxx",
-  "requestId": "main-request-123",
-  "status": "completed",
-  "startedAt": "2026-05-22T00:00:00.000Z",
-  "updatedAt": "2026-05-22T00:00:01.000Z",
-  "inputPreview": "Analyze today's store performance.",
-  "durationMs": 1000,
-  "context": {
-    "storeId": "store-1"
-  },
-  "metadata": {
-    "source": "main-system"
-  },
-  "lastEventType": "run_completed"
-}
-```
-
-```http
-GET /api/v1/runs/:runId/result
-```
+Returns run metadata plus final result or error.
 
 Response:
 
@@ -690,13 +677,11 @@ Response:
 }
 ```
 
-List user-safe run events:
+#### `GET /api/v1/runs/:runId/events`
 
-```http
-GET /api/v1/runs/:runId/events
-```
+Lists user-safe run events.
 
-Supports `limit` and `cursor`.
+Query params: `limit`, `cursor`.
 
 Response:
 
@@ -725,26 +710,18 @@ Response:
 }
 ```
 
-Retry a run:
+#### `POST /api/v1/runs/:runId/retry`
 
-```http
-POST /api/v1/runs/:runId/retry
-```
+Retries a run using the original user input. Optional request fields override original run metadata.
 
-Request:
+Request body:
 
-```json
-{
-  "requestId": "main-request-124",
-  "callbackUrl": "https://main-system.example/ai/callback",
-  "context": {
-    "storeId": "store-1"
-  },
-  "metadata": {
-    "source": "main-system"
-  }
-}
-```
+| Field | Type | Required | Description |
+| --- | --- | --- | --- |
+| `requestId` | string | no | New request id. Defaults to original request id. |
+| `callbackUrl` | string | no | New callback URL. Defaults to original callback URL. |
+| `context` | object | no | New context. Defaults to original context. |
+| `metadata` | object | no | New metadata. Defaults to original metadata. |
 
 Response:
 
@@ -757,11 +734,9 @@ Response:
 }
 ```
 
-Cancel a running run:
+#### `POST /api/v1/runs/:runId/cancel`
 
-```http
-POST /api/v1/runs/:runId/cancel
-```
+Attempts to abort a running run.
 
 Response:
 
@@ -772,8 +747,51 @@ Response:
 }
 ```
 
-```http
-GET /api/v1/runs/:runId/stream
+#### `GET /api/v1/runs/:runId/stream`
+
+Server-sent events stream for user-safe run events.
+
+SSE payload example:
+
+```text
+data: {"type":"final_answer","runId":"run_xxx","text":"The analysis result.","timestamp":"2026-05-22T00:00:01.000Z","sequence":10}
 ```
 
-Server-sent events. The stream emits user-safe events such as `run_started`, `final_answer`, `context_compacted`, `run_completed`, `run_failed`, and `run_aborted`.
+## 5. Webhook Callback
+
+If `callbackUrl` is provided on an async message request or retry request, Helixent sends a best-effort `POST` when the run finishes.
+
+Callback request:
+
+```http
+POST <callbackUrl>
+Content-Type: application/json
+```
+
+Callback body:
+
+```json
+{
+  "runId": "run_xxx",
+  "sessionId": "session_xxx",
+  "conversationId": "session_xxx",
+  "requestId": "main-request-123",
+  "status": "completed",
+  "finalAnswer": "The analysis result.",
+  "lastEventType": "run_completed"
+}
+```
+
+Webhook delivery rules:
+
+| Rule | Contract |
+| --- | --- |
+| Delivery | Best-effort. |
+| Retry | No retry in v1. |
+| Authentication/signature | No callback signature in v1. |
+| Idempotency | Main system should use `runId` or `requestId`. |
+| Compensation | Main system can call `GET /api/v1/runs/:runId/result`. |
+
+## 6. Runtime Data Lifecycle
+
+Conversation, run, message, and trace data are held by the Helixent service runtime in v1. They are not a durable source of record. The main system should store its own business records, including `externalConversationId`, `conversationId`, `requestId`, and `runId` where needed.
