@@ -8,6 +8,7 @@ import {
   readWorkflowFile,
   type TraceEvent,
   type TraceEventInput,
+  type TraceRunSummary,
   type TraceStore,
   runWorkflow,
 } from "@/agent";
@@ -49,6 +50,8 @@ interface DebugSession {
   agentType: AgentType;
   createdAt: string;
   updatedAt: string;
+  externalConversationId?: string;
+  metadata?: Record<string, unknown>;
   agent?: Agent;
   runCount: number;
   deleted: boolean;
@@ -61,6 +64,8 @@ interface DebugSessionSummary {
   agentType: AgentType;
   createdAt: string;
   updatedAt: string;
+  externalConversationId?: string;
+  metadata?: Record<string, unknown>;
   active: boolean;
   runCount: number;
 }
@@ -81,6 +86,124 @@ export function createDebugAgentService({
 
       if (request.method === "GET" && url.pathname === "/api/health") {
         return jsonResponse({ ok: true, service: "helixent-debug-agent" });
+      }
+
+      if (request.method === "GET" && url.pathname === "/api/v1/health") {
+        return jsonResponse({ ok: true, service: "helixent-debug-agent", version: "v1" });
+      }
+
+      if (request.method === "GET" && url.pathname === "/api/v1/agents") {
+        return jsonResponse({
+          agents: Object.values(AGENT_PROFILES).map((profile) => ({
+            type: profile.type,
+            name: profile.name,
+            role: profile.role,
+            description: profile.description,
+          })),
+        });
+      }
+
+      if (request.method === "POST" && url.pathname === "/api/v1/conversations") {
+        const body = await readJson<{
+          agentType?: unknown;
+          externalConversationId?: string;
+          metadata?: unknown;
+          title?: string;
+        }>(request);
+        const agentType = readAgentType(body.agentType);
+        const session = createSession(sessions, body.title?.trim() || AGENT_PROFILES[agentType].name, agentType, {
+          externalConversationId: body.externalConversationId?.trim() || undefined,
+          metadata: readObject(body.metadata),
+        });
+        return jsonResponse({ conversationId: session.id, conversation: summarizeSession(session) });
+      }
+
+      if (request.method === "POST" && url.pathname === "/api/v1/agent/messages") {
+        const body = await readJson<{
+          agentType?: unknown;
+          conversationId?: string;
+          externalConversationId?: string;
+          message?: string;
+          metadata?: unknown;
+          title?: string;
+        }>(request);
+        const message = body.message?.trim();
+        if (!message) {
+          return jsonResponse({ error: "message is required" }, 400);
+        }
+        const agentType = readAgentType(body.agentType);
+        const session = body.conversationId
+          ? sessions.get(body.conversationId)
+          : createSession(sessions, body.title?.trim() || AGENT_PROFILES[agentType].name, agentType, {
+            externalConversationId: body.externalConversationId?.trim() || undefined,
+            metadata: readObject(body.metadata),
+          });
+        if (!session) {
+          return jsonResponse({ error: "conversation not found" }, 404);
+        }
+        const runId = `run_${crypto.randomUUID()}`;
+        enqueueRun({ session, runId, message, createAgent, traceStore });
+        return jsonResponse({ runId, conversationId: session.id, status: "running" });
+      }
+
+      const conversationMessageMatch = url.pathname.match(/^\/api\/v1\/conversations\/([^/]+)\/messages$/);
+      if (request.method === "POST" && conversationMessageMatch) {
+        const conversationId = decodeURIComponent(conversationMessageMatch[1]!);
+        const session = sessions.get(conversationId);
+        if (!session) {
+          return jsonResponse({ error: "conversation not found" }, 404);
+        }
+        const body = await readJson<{ message?: string; metadata?: unknown }>(request);
+        const message = body.message?.trim();
+        if (!message) {
+          return jsonResponse({ error: "message is required" }, 400);
+        }
+        const runId = `run_${crypto.randomUUID()}`;
+        enqueueRun({ session, runId, message, createAgent, traceStore });
+        return jsonResponse({ runId, conversationId: session.id, status: "running" });
+      }
+
+      const v1RunMatch = url.pathname.match(/^\/api\/v1\/runs\/([^/]+)$/);
+      if (request.method === "GET" && v1RunMatch) {
+        const runId = decodeURIComponent(v1RunMatch[1]!);
+        const summary = traceStore.listRuns().find((run) => run.runId === runId);
+        if (!summary) {
+          return jsonResponse({ error: "run not found" }, 404);
+        }
+        return jsonResponse(toMainSystemRun(summary));
+      }
+
+      const v1RunResultMatch = url.pathname.match(/^\/api\/v1\/runs\/([^/]+)\/result$/);
+      if (request.method === "GET" && v1RunResultMatch) {
+        const runId = decodeURIComponent(v1RunResultMatch[1]!);
+        const summary = traceStore.listRuns().find((run) => run.runId === runId);
+        if (!summary) {
+          return jsonResponse({ error: "run not found" }, 404);
+        }
+        const events = traceStore.getEvents(runId);
+        const finalAnswer = [...events].reverse().find((event) => event.type === "final_answer");
+        const failure = [...events].reverse().find((event) => event.type === "run_failed" || event.type === "workflow_failed");
+        return jsonResponse({
+          ...toMainSystemRun(summary),
+          finalAnswer: finalAnswer && "text" in finalAnswer ? finalAnswer.text : undefined,
+          error: failure && "error" in failure ? failure.error : undefined,
+        });
+      }
+
+      const v1RunStreamMatch = url.pathname.match(/^\/api\/v1\/runs\/([^/]+)\/stream$/);
+      if (request.method === "GET" && v1RunStreamMatch) {
+        return sseResponse((send) => {
+          const runId = decodeURIComponent(v1RunStreamMatch[1]!);
+          for (const event of traceStore.getEvents(runId)) {
+            const userEvent = toUserSafeEvent(event);
+            if (userEvent) send(userEvent);
+          }
+          return traceStore.subscribe((event) => {
+            if (event.runId !== runId) return;
+            const userEvent = toUserSafeEvent(event);
+            if (userEvent) send(userEvent);
+          });
+        });
       }
 
       if (request.method === "POST" && url.pathname === "/api/agent/runs") {
@@ -282,7 +405,12 @@ function createDefaultWorkflowTools(): Tool[] {
   ];
 }
 
-function createSession(sessions: Map<string, DebugSession>, title: string, agentType: AgentType = "gma"): DebugSession {
+function createSession(
+  sessions: Map<string, DebugSession>,
+  title: string,
+  agentType: AgentType = "gma",
+  options: { externalConversationId?: string; metadata?: Record<string, unknown> } = {},
+): DebugSession {
   const now = new Date().toISOString();
   const session = {
     id: `session_${crypto.randomUUID()}`,
@@ -290,6 +418,8 @@ function createSession(sessions: Map<string, DebugSession>, title: string, agent
     agentType,
     createdAt: now,
     updatedAt: now,
+    externalConversationId: options.externalConversationId,
+    metadata: options.metadata,
     runCount: 0,
     deleted: false,
     queue: Promise.resolve(),
@@ -309,8 +439,17 @@ function summarizeSession(session: DebugSession): DebugSessionSummary {
     agentType: session.agentType,
     createdAt: session.createdAt,
     updatedAt: session.updatedAt,
+    externalConversationId: session.externalConversationId,
+    metadata: session.metadata,
     active: Boolean(session.agent),
     runCount: session.runCount,
+  };
+}
+
+function toMainSystemRun(summary: TraceRunSummary): TraceRunSummary & { conversationId?: string } {
+  return {
+    ...summary,
+    conversationId: summary.sessionId,
   };
 }
 

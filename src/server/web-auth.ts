@@ -4,6 +4,7 @@ export interface WebAuthUser {
 }
 
 export interface WebAuthOptions {
+  apiKeys?: string[];
   users?: WebAuthUser[];
   handleAuthorized: (..._args: [Request]) => Promise<Response>;
 }
@@ -12,16 +13,27 @@ const SESSION_COOKIE_NAME = "helixent_session";
 const SESSION_MAX_AGE_SECONDS = 60 * 60 * 24;
 
 /** Wraps a request handler with password-based web authentication. */
-export function createWebAuth({ users = parseWebAuthUsers(Bun.env.HELIXENT_WEB_USERS), handleAuthorized }: WebAuthOptions) {
+export function createWebAuth({
+  apiKeys = parseApiKeys(Bun.env.HELIXENT_API_KEYS),
+  users = parseWebAuthUsers(Bun.env.HELIXENT_WEB_USERS),
+  handleAuthorized,
+}: WebAuthOptions) {
   const sessions = new Map<string, string>();
+  const apiKeySet = new Set(apiKeys);
   const userMap = new Map(users.map((user) => [user.username, user.password]));
 
   return {
     fetch: async (request: Request): Promise<Response> => {
       const url = new URL(request.url);
 
-      if (request.method === "GET" && url.pathname === "/api/health") {
+      if (request.method === "GET" && (url.pathname === "/api/health" || url.pathname === "/api/v1/health")) {
         return handleAuthorized(request);
+      }
+
+      if (url.pathname.startsWith("/api/v1/")) {
+        return hasValidApiKey(request, apiKeySet)
+          ? handleAuthorized(request)
+          : jsonResponse({ error: "valid api key is required" }, 401);
       }
 
       if (request.method === "GET" && url.pathname === "/api/auth/me") {
@@ -67,6 +79,11 @@ export function createWebAuth({ users = parseWebAuthUsers(Bun.env.HELIXENT_WEB_U
   };
 }
 
+/** Parses comma-separated API keys for service-to-service requests. */
+export function parseApiKeys(raw: string | undefined): string[] {
+  return raw?.split(",").map((key) => key.trim()).filter(Boolean) ?? [];
+}
+
 /** Parses web users from `username:password` pairs and always includes admin/admin. */
 export function parseWebAuthUsers(raw: string | undefined): WebAuthUser[] {
   const users = new Map<string, string>([["admin", "admin"]]);
@@ -81,6 +98,13 @@ export function parseWebAuthUsers(raw: string | undefined): WebAuthUser[] {
     }
   }
   return [...users].map(([username, password]) => ({ username, password }));
+}
+
+function hasValidApiKey(request: Request, apiKeys: Set<string>): boolean {
+  if (apiKeys.size === 0) return false;
+  const authorization = request.headers.get("authorization")?.trim();
+  if (!authorization?.toLowerCase().startsWith("bearer ")) return false;
+  return apiKeys.has(authorization.slice("bearer ".length).trim());
 }
 
 function readSessionUsername(request: Request, sessions: Map<string, string>): string | null {

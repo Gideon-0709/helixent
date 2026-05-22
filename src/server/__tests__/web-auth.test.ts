@@ -41,6 +41,36 @@ describe("web auth", () => {
     expect(await authorizedResponse.text()).toBe("ok");
   });
 
+  test("authorizes main system api requests with bearer api keys", async () => {
+    const auth = createWebAuth({
+      apiKeys: ["main-system-secret"],
+      users: [{ username: "admin", password: "admin" }],
+      handleAuthorized: async () => new Response("ok"),
+    });
+
+    const response = await auth.fetch(
+      new Request("http://localhost/api/v1/agents", {
+        headers: { authorization: "Bearer main-system-secret" },
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe("ok");
+  });
+
+  test("rejects main system api requests without a valid bearer api key", async () => {
+    const auth = createWebAuth({
+      apiKeys: ["main-system-secret"],
+      users: [{ username: "admin", password: "admin" }],
+      handleAuthorized: async () => new Response("ok"),
+    });
+
+    const response = await auth.fetch(new Request("http://localhost/api/v1/agents"));
+
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({ error: "valid api key is required" });
+  });
+
   test("parses additional users while keeping the default admin account", () => {
     expect(parseWebAuthUsers("admin:changed,alice:secret,bob:another-secret")).toEqual([
       { username: "admin", password: "admin" },

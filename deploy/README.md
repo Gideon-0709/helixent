@@ -35,6 +35,18 @@ Add more users in `deploy/compose/.env`:
 HELIXENT_WEB_USERS=alice:alice-password,bob:bob-password
 ```
 
+Main-system `/api/v1/*` calls use bearer API keys instead of the web login:
+
+```env
+HELIXENT_API_KEYS=main-system-secret
+```
+
+Example:
+
+```bash
+curl -H "Authorization: Bearer main-system-secret" http://localhost:3002/api/v1/agents
+```
+
 Stop:
 
 ```bash

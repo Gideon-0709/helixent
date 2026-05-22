@@ -173,6 +173,112 @@ describe("createDebugAgentService", () => {
     expect(sessions[0]).toMatchObject({ title: "RM", agentType: "rm" });
   });
 
+  test("lists stable main system agent profiles", async () => {
+    const service = createDebugAgentService();
+
+    const response = await service.fetch(new Request("http://localhost/api/v1/agents"));
+    const payload = (await response.json()) as { agents: Array<{ type: string; name: string }> };
+
+    expect(response.status).toBe(200);
+    expect(payload.agents.map((agent) => agent.type)).toEqual(["gma", "rm", "sm"]);
+    expect(payload.agents[0]).toMatchObject({ type: "gma", name: "GMA" });
+  });
+
+  test("creates a main system conversation and runs messages on it", async () => {
+    const service = createDebugAgentService({
+      createAgent: async () =>
+        new Agent({
+          model: new Model("test-model", new FinalAnswerProvider()),
+          prompt: "test prompt",
+        }),
+    });
+
+    const conversationResponse = await service.fetch(
+      new Request("http://localhost/api/v1/conversations", {
+        method: "POST",
+        body: JSON.stringify({
+          agentType: "gma",
+          title: "Main system conversation",
+          externalConversationId: "main-conv-1",
+          metadata: { tenantId: "tenant-1" },
+        }),
+      }),
+    );
+    const conversationPayload = (await conversationResponse.json()) as {
+      conversationId: string;
+      conversation: { id: string; title: string; agentType: string; externalConversationId?: string; metadata?: Record<string, unknown> };
+    };
+
+    expect(conversationResponse.status).toBe(200);
+    expect(conversationPayload.conversation).toMatchObject({
+      id: conversationPayload.conversationId,
+      title: "Main system conversation",
+      agentType: "gma",
+      externalConversationId: "main-conv-1",
+      metadata: { tenantId: "tenant-1" },
+    });
+
+    const messageResponse = await service.fetch(
+      new Request(`http://localhost/api/v1/conversations/${conversationPayload.conversationId}/messages`, {
+        method: "POST",
+        body: JSON.stringify({ message: "hello from main system", metadata: { source: "main" } }),
+      }),
+    );
+    const messagePayload = (await messageResponse.json()) as { runId: string; conversationId: string; status: string };
+
+    expect(messageResponse.status).toBe(200);
+    expect(messagePayload).toMatchObject({
+      conversationId: conversationPayload.conversationId,
+      status: "running",
+    });
+
+    await waitFor(() => service.traceStore.getEvents(messagePayload.runId).some((event) => event.type === "run_completed"));
+
+    const runResponse = await service.fetch(new Request(`http://localhost/api/v1/runs/${messagePayload.runId}`));
+    const runPayload = (await runResponse.json()) as { runId: string; status: string; conversationId?: string };
+    expect(runResponse.status).toBe(200);
+    expect(runPayload).toMatchObject({
+      runId: messagePayload.runId,
+      status: "completed",
+      conversationId: conversationPayload.conversationId,
+    });
+
+    const resultResponse = await service.fetch(new Request(`http://localhost/api/v1/runs/${messagePayload.runId}/result`));
+    const resultPayload = (await resultResponse.json()) as { status: string; finalAnswer?: string };
+    expect(resultResponse.status).toBe(200);
+    expect(resultPayload).toMatchObject({
+      status: "completed",
+      finalAnswer: "hello from agent",
+    });
+  });
+
+  test("starts a main system message without explicitly creating a conversation", async () => {
+    const service = createDebugAgentService({
+      createAgent: async () =>
+        new Agent({
+          model: new Model("test-model", new FinalAnswerProvider()),
+          prompt: "test prompt",
+        }),
+    });
+
+    const response = await service.fetch(
+      new Request("http://localhost/api/v1/agent/messages", {
+        method: "POST",
+        body: JSON.stringify({
+          agentType: "rm",
+          message: "inspect this",
+          metadata: { tenantId: "tenant-1" },
+        }),
+      }),
+    );
+    const payload = (await response.json()) as { runId: string; conversationId: string; status: string };
+
+    expect(response.status).toBe(200);
+    expect(payload.status).toBe("running");
+    expect(payload.runId).toStartWith("run_");
+    expect(payload.conversationId).toStartWith("session_");
+  });
+
   test("deletes a debug session and releases its trace events", async () => {
     const service = createDebugAgentService({
       createAgent: async () =>
