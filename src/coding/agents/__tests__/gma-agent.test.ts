@@ -30,6 +30,16 @@ describe("createGmaAgent", () => {
 
     expect(agent.name).toBe("GMA");
   });
+
+  test("adds caller-provided middleware to the role agent", async () => {
+    const middleware = { beforeModel: async () => undefined };
+    const agent = await createGmaAgent({
+      model: new Model("test-model", new NoopProvider()),
+      middlewares: [middleware],
+    });
+
+    expect(agent.middlewares).toContain(middleware);
+  });
 });
 
 describe("agent profile factories", () => {

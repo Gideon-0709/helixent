@@ -909,7 +909,7 @@ select:focus {
 }
 
 .composer-box {
-  overflow: hidden;
+  overflow: visible;
   border: 1px solid var(--line-strong);
   border-radius: 10px;
   background: #080d16;
@@ -917,12 +917,13 @@ select:focus {
 }
 
 #promptInput {
+  overflow: auto;
   min-height: 74px;
   max-height: 128px;
   resize: none;
   display: block;
   border: 0;
-  border-radius: 0;
+  border-radius: 10px 10px 0 0;
   padding: 12px 13px 8px;
   background: transparent;
   line-height: 1.5;
@@ -933,9 +934,11 @@ select:focus {
 }
 
 .composer-footer {
+  position: relative;
+  border-radius: 0 0 10px 10px;
   min-height: 44px;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   align-items: center;
   gap: 10px;
   border-top: 1px solid rgba(88, 166, 255, 0.12);
@@ -949,6 +952,128 @@ select:focus {
   font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.context-usage-wrap {
+  position: relative;
+  width: 132px;
+  min-width: 132px;
+}
+
+.context-usage {
+  width: 132px;
+  min-width: 132px;
+  height: 38px;
+  min-height: 38px;
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  border: 1px solid rgba(88, 166, 255, 0.18);
+  border-radius: 8px;
+  padding: 5px 8px 5px 6px;
+  background: rgba(13, 17, 23, 0.72);
+  box-shadow: var(--inset-glow);
+  text-align: left;
+}
+
+.context-usage:hover,
+.context-usage.open {
+  background: rgba(17, 24, 39, 0.92);
+  border-color: rgba(88, 166, 255, 0.34);
+}
+
+.context-ring {
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at center, #080d16 0 52%, transparent 53%),
+    conic-gradient(var(--context-color, var(--blue)) var(--context-progress), rgba(139, 148, 158, 0.2) 0);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.05);
+}
+
+.context-copy {
+  min-width: 0;
+  display: grid;
+  gap: 1px;
+}
+
+.context-copy strong {
+  color: var(--fg-strong);
+  font-size: 12px;
+  line-height: 1;
+}
+
+.context-copy span {
+  font-size: 10px;
+  line-height: 1.1;
+}
+
+.context-usage.normal {
+  --context-color: var(--blue);
+}
+
+.context-usage.warning {
+  --context-color: var(--amber);
+  border-color: rgba(210, 153, 34, 0.28);
+}
+
+.context-usage.danger {
+  --context-color: var(--red);
+  border-color: rgba(255, 123, 114, 0.3);
+}
+
+.context-usage.disabled {
+  --context-color: var(--muted);
+  opacity: 0.68;
+}
+
+.context-popover {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 8px);
+  z-index: 20;
+  width: 260px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  padding: 12px;
+  background: #0d1117;
+  box-shadow: var(--shadow);
+}
+
+.context-popover-title {
+  color: var(--fg-strong);
+  font-size: 12px;
+  font-weight: 750;
+  margin-bottom: 10px;
+}
+
+.context-popover dl {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+}
+
+.context-popover dl div {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+}
+
+.context-popover dt,
+.context-popover dd {
+  margin: 0;
+  font-size: 12px;
+}
+
+.context-popover dt {
+  color: var(--muted);
+}
+
+.context-popover dd {
+  color: var(--fg);
+  font-weight: 650;
 }
 
 .composer-send {

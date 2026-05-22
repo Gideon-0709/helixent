@@ -15,6 +15,7 @@ import {
   AGENT_PROFILES,
   addDraftSession,
   cloneDefaultResources,
+  deriveContextUsage,
   DRAFT_SESSION_PREFIX,
   isDraftSessionId,
   shouldSubmitComposerKey,
@@ -22,6 +23,7 @@ import {
   toKeyEvent,
   visibleSessions,
   type AgentType,
+  type ContextUsage,
   type EditableResource,
   type PanelTraceEvent,
   type PanelSessionSummary,
@@ -50,6 +52,20 @@ interface LoginCredentials {
   password: string;
 }
 
+interface ContextPolicyResponse {
+  enabled?: boolean;
+  keepRecentMessages?: number;
+  maxMessagesBeforeCompact?: number;
+  maxSummaryCharacters?: number;
+}
+
+const DEFAULT_CONTEXT_POLICY = {
+  enabled: true,
+  keepRecentMessages: 8,
+  maxMessagesBeforeCompact: 24,
+  maxSummaryCharacters: 4000,
+};
+
 export function App() {
   const [authStatus, setAuthStatus] = useState<AuthStatus>("checking");
   const [authUsername, setAuthUsername] = useState<string | null>(null);
@@ -68,6 +84,7 @@ export function App() {
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [eventsByRun, setEventsByRun] = useState<Map<string, PanelTraceEvent[]>>(() => new Map());
   const [tokenStatsBaseline, setTokenStatsBaseline] = useState({ prompt: 0, completion: 0, total: 0 });
+  const [contextPolicy, setContextPolicy] = useState(DEFAULT_CONTEXT_POLICY);
   const [isSavingResource, setIsSavingResource] = useState(false);
   const [isRunningWorkflow, setIsRunningWorkflow] = useState(false);
   const [editorStatus, setEditorStatus] = useState("Loading resources...");
@@ -99,12 +116,14 @@ export function App() {
     const maxLabelLength = Math.max(0, ...agentOptions.map((option) => option.label.length));
     return `calc(${maxLabelLength}ch + 58px)`;
   }, [agentOptions]);
+  const sessionContextEvents = collectSessionEvents({ runs: sessionRuns, eventsByRun, runSessionIds, selectedSessionId });
   const selectedEvents = selectedRunId
     ? eventsByRun.get(selectedRunId) ?? []
-    : collectSessionEvents({ runs: sessionRuns, eventsByRun, runSessionIds, selectedSessionId });
+    : sessionContextEvents;
   const keyEvents = selectedEvents.map(toKeyEvent).filter((event) => event !== null);
   const rawTokenStats = aggregateTokenStats([...eventsByRun.values()].flat());
   const tokenStats = subtractTokenStats(rawTokenStats, tokenStatsBaseline);
+  const contextUsage = deriveContextUsage(sessionContextEvents, contextPolicy);
 
   useEffect(() => {
     void checkAuth();
@@ -115,6 +134,7 @@ export function App() {
     void loadResources();
     void loadSessions();
     void loadRuns();
+    void loadContextPolicy();
   }, [authStatus]);
 
   useEffect(() => {
@@ -217,6 +237,18 @@ export function App() {
     if (updateStatus) {
       setEditorStatus("Resources loaded");
     }
+  }
+
+  async function loadContextPolicy() {
+    const response = await panelFetch("/api/internal/context-policy");
+    if (!response.ok) return;
+    const payload = (await response.json()) as ContextPolicyResponse;
+    setContextPolicy({
+      enabled: payload.enabled ?? DEFAULT_CONTEXT_POLICY.enabled,
+      maxMessagesBeforeCompact: payload.maxMessagesBeforeCompact ?? DEFAULT_CONTEXT_POLICY.maxMessagesBeforeCompact,
+      keepRecentMessages: payload.keepRecentMessages ?? DEFAULT_CONTEXT_POLICY.keepRecentMessages,
+      maxSummaryCharacters: payload.maxSummaryCharacters ?? DEFAULT_CONTEXT_POLICY.maxSummaryCharacters,
+    });
   }
 
   async function refreshArchiveResources() {
@@ -845,7 +877,14 @@ export function App() {
               </div>
             </div>
           </section>
-          <AgentComposer agentName={composerAgentName} selectedRunId={selectedRunId} selectedSessionId={selectedSessionId} onSubmit={startRun} />
+          <AgentComposer
+            agentName={composerAgentName}
+            contextEnabled={contextPolicy.enabled}
+            contextUsage={contextUsage}
+            selectedRunId={selectedRunId}
+            selectedSessionId={selectedSessionId}
+            onSubmit={startRun}
+          />
         </main>
 
         <aside className="events" data-panel-section="events">
@@ -925,11 +964,15 @@ function LoginPanel({ error, onSubmit }: { error: string; onSubmit: (_credential
 
 function AgentComposer({
   agentName,
+  contextEnabled,
+  contextUsage,
   selectedRunId,
   selectedSessionId,
   onSubmit,
 }: {
   agentName: string;
+  contextEnabled: boolean;
+  contextUsage: ContextUsage;
   selectedRunId: string | null;
   selectedSessionId: string | null;
   onSubmit: (message: string) => Promise<void>;
@@ -970,6 +1013,7 @@ function AgentComposer({
         />
         <div className="composer-footer">
           <span>{selectedRunId ?? selectedSessionId ?? "No active agent"}</span>
+          <ContextUsageRing enabled={contextEnabled} usage={contextUsage} />
           <button
             type="button"
             className="primary icon-button composer-send"
@@ -984,6 +1028,95 @@ function AgentComposer({
       </div>
     </section>
   );
+}
+
+function ContextUsageRing({ enabled, usage }: { enabled: boolean; usage: ContextUsage }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement | null>(null);
+  const statusText = enabled ? contextStatusText(usage) : "Context compaction disabled";
+  const label = enabled
+    ? [
+      `Context usage: ${usage.percent}%`,
+      `Messages: ${usage.messageCount} / ${usage.maxMessagesBeforeCompact}`,
+      `Keep recent: ${usage.keepRecentMessages}`,
+      usage.summaryActive ? `Summary active: ${usage.compactedCount} compaction event${usage.compactedCount === 1 ? "" : "s"}` : "Summary active: no",
+    ].join("\n")
+    : "Context compaction disabled";
+
+  useEffect(() => {
+    if (!open) return;
+    const handlePointerDown = (event: PointerEvent) => {
+      if (!ref.current?.contains(event.target as Node)) {
+        setOpen(false);
+      }
+    };
+    window.addEventListener("pointerdown", handlePointerDown);
+    return () => window.removeEventListener("pointerdown", handlePointerDown);
+  }, [open]);
+
+  function handleKeyDown(event: ReactKeyboardEvent<HTMLButtonElement>) {
+    if (event.key === "Escape") {
+      setOpen(false);
+    }
+  }
+
+  return (
+    <div ref={ref} className="context-usage-wrap">
+      <button
+        type="button"
+        className={`context-usage ${enabled ? usage.status : "disabled"} ${open ? "open" : ""}`}
+        title={label}
+        aria-label={label}
+        aria-expanded={open}
+        onClick={() => setOpen((current) => !current)}
+        onKeyDown={handleKeyDown}
+      >
+        <span
+          className="context-ring"
+          style={{ "--context-progress": `${enabled ? usage.percent : 0}%` } as CSSProperties}
+          aria-hidden="true"
+        />
+        <span className="context-copy">
+          <strong>{enabled ? `${usage.percent}%` : "Off"}</strong>
+          <span>{statusText}</span>
+        </span>
+      </button>
+      {open ? <ContextUsageDetails enabled={enabled} usage={usage} /> : null}
+    </div>
+  );
+}
+
+function ContextUsageDetails({ enabled, usage }: { enabled: boolean; usage: ContextUsage }) {
+  return (
+    <div className="context-popover" role="dialog" aria-label="Context usage details">
+      <div className="context-popover-title">Context Window</div>
+      <dl>
+        <div>
+          <dt>Usage</dt>
+          <dd>{enabled ? `${usage.percent}%` : "Disabled"}</dd>
+        </div>
+        <div>
+          <dt>Messages</dt>
+          <dd>{usage.messageCount} / {usage.maxMessagesBeforeCompact}</dd>
+        </div>
+        <div>
+          <dt>Keep Recent</dt>
+          <dd>{usage.keepRecentMessages}</dd>
+        </div>
+        <div>
+          <dt>Summary</dt>
+          <dd>{usage.summaryActive ? `Active (${usage.compactedCount})` : "Not yet"}</dd>
+        </div>
+      </dl>
+    </div>
+  );
+}
+
+function contextStatusText(usage: ContextUsage): string {
+  if (usage.summaryActive) return "Summary active";
+  if (usage.status === "danger") return "Near compact";
+  if (usage.status === "warning") return "Getting full";
+  return "Context";
 }
 
 function CustomSelect({

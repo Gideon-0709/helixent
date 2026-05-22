@@ -47,6 +47,15 @@ Example:
 curl -H "Authorization: Bearer main-system-secret" http://localhost:3002/api/v1/agents
 ```
 
+Long conversations are compacted automatically before they exceed the normal message window. The default policy keeps the latest 8 transcript messages verbatim and summarizes older messages after the transcript grows beyond 24 messages:
+
+```env
+HELIXENT_CONTEXT_COMPACTION=on
+HELIXENT_CONTEXT_MAX_MESSAGES=24
+HELIXENT_CONTEXT_KEEP_RECENT_MESSAGES=8
+HELIXENT_CONTEXT_MAX_SUMMARY_CHARS=4000
+```
+
 Stop:
 
 ```bash

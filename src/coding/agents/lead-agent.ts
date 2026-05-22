@@ -1,6 +1,6 @@
 import { join } from "path";
 
-import { Agent } from "@/agent";
+import { Agent, type AgentMiddleware } from "@/agent";
 import { createSkillsMiddleware } from "@/agent/skills/skills-middleware";
 import { createTodoSystem } from "@/agent/todos/todos";
 import type { Model, NonSystemMessage, ToolUseContent } from "@/foundation";
@@ -45,6 +45,7 @@ interface CreateRoleAgentOptions {
   // eslint-disable-next-line no-unused-vars
   askUserQuestion?: (params: AskUserQuestionParameters) => Promise<AskUserQuestionResult>;
   approvalPersistence?: ApprovalPersistence;
+  middlewares?: AgentMiddleware[];
 }
 
 export async function createRoleAgent({
@@ -55,6 +56,7 @@ export async function createRoleAgent({
   askUser,
   askUserQuestion,
   approvalPersistence,
+  middlewares,
   prompt,
 }: CreateRoleAgentOptions & { agentType?: AgentType }) {
   const profile = AGENT_PROFILES[agentType];
@@ -67,6 +69,7 @@ export async function createRoleAgent({
     askUser,
     askUserQuestion,
     approvalPersistence,
+    extraMiddlewares: middlewares,
   });
 }
 
@@ -90,6 +93,7 @@ async function createAgent({
   askUser,
   askUserQuestion,
   approvalPersistence,
+  extraMiddlewares = [],
   prompt,
 }: {
   name: string;
@@ -102,6 +106,7 @@ async function createAgent({
   // eslint-disable-next-line no-unused-vars
   askUserQuestion?: (params: AskUserQuestionParameters) => Promise<AskUserQuestionResult>;
   approvalPersistence?: ApprovalPersistence;
+  extraMiddlewares?: AgentMiddleware[];
 }) {
   const agentsFile = Bun.file(`${cwd}/AGENTS.md`);
   const messages: NonSystemMessage[] = [];
@@ -121,7 +126,7 @@ async function createAgent({
 
   const askUserQuestionTool = askUserQuestion ? createAskUserQuestionTool(askUserQuestion) : null;
 
-  const middlewares = [createSkillsMiddleware(skillsDirs), todoMiddleware];
+  const middlewares = [createSkillsMiddleware(skillsDirs), todoMiddleware, ...extraMiddlewares];
   if (askUser) {
     middlewares.push(
       createCodingApprovalMiddleware({

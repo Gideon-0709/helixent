@@ -225,7 +225,19 @@ export class Agent {
       tools: this.tools,
       signal: this._abortController?.signal,
     };
+    const previousMessageCount = this.messages.length;
     await this._beforeModel(modelContext);
+    const currentMessageCount = this.messages.length;
+    if (currentMessageCount < previousMessageCount) {
+      yield {
+        type: "context_compacted",
+        previousMessageCount,
+        currentMessageCount,
+        compactedMessageCount: previousMessageCount - currentMessageCount + 1,
+        keptMessageCount: Math.max(0, currentMessageCount - 1),
+        summaryPreview: previewText(firstAssistantText(this.messages[0]), 240),
+      };
+    }
 
     let latest: AssistantMessage | null = null;
     const modelStartedAt = Date.now();
@@ -474,6 +486,16 @@ function assistantMessageText(message: AssistantMessage): string {
     .filter((content) => content.type === "text")
     .map((content) => content.text)
     .join("\n");
+}
+
+function firstAssistantText(message: NonSystemMessage | undefined): string {
+  if (message?.role !== "assistant") return "";
+  return assistantMessageText(message);
+}
+
+function previewText(text: string, maxChars: number): string | undefined {
+  if (!text) return undefined;
+  return text.length > maxChars ? `${text.slice(0, maxChars - 3)}...` : text;
 }
 
 function isAbortError(error: unknown): boolean {

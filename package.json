@@ -37,12 +37,12 @@
     "hooks:install": "git config core.hooksPath .githooks",
     "build:bin": "rm -rf dist/bin && bun build index.ts --compile --outfile dist/bin/helixent",
     "build:js": "rm -rf dist/js && bun build ./index.ts --outdir ./dist/js --splitting --target bun",
-    "check": "tsc --noEmit && eslint . --ext .ts && bun test",
+    "check": "tsc --noEmit && bun --bun node_modules/.bin/eslint . --ext .ts && bun test",
     "check:types": "tsc --noEmit",
     "debug:agent": "bun run src/server/index.ts",
     "dev": "bun run index.ts",
-    "lint": "eslint . --ext .ts",
-    "lint:fix": "eslint . --ext .ts --fix"
+    "lint": "bun --bun node_modules/.bin/eslint . --ext .ts",
+    "lint:fix": "bun --bun node_modules/.bin/eslint . --ext .ts --fix"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.0",

@@ -3,6 +3,7 @@ import { describe, expect, test } from "bun:test";
 import {
   aggregateTokenStats,
   addDraftSession,
+  deriveContextUsage,
   createResource,
   defaultResources,
   isDraftSessionId,
@@ -73,6 +74,57 @@ describe("debug panel model", () => {
     });
   });
 
+  test("maps context compaction events into focused event cards", () => {
+    const event = {
+      id: "evt_1",
+      runId: "run_1",
+      sequence: 3,
+      timestamp: "2026-05-18T01:02:03.000Z",
+      type: "context_compacted",
+      previousMessageCount: 25,
+      currentMessageCount: 9,
+      compactedMessageCount: 17,
+      keptMessageCount: 8,
+    } satisfies PanelTraceEvent;
+
+    expect(toKeyEvent(event)).toMatchObject({
+      kind: "meta",
+      title: "Context Compacted",
+      text: "17 older messages summarized, 8 recent messages kept",
+    });
+  });
+
+  test("derives context usage from trace events", () => {
+    const events: PanelTraceEvent[] = [
+      runStartedEvent("run_1", 1, "first"),
+      assistantMessageEvent("run_1", 2),
+      runStartedEvent("run_2", 1, "second"),
+      assistantMessageEvent("run_2", 2),
+      {
+        id: "evt_compact",
+        runId: "run_3",
+        sequence: 1,
+        timestamp: "2026-05-18T01:02:03.000Z",
+        type: "context_compacted",
+        previousMessageCount: 5,
+        currentMessageCount: 3,
+        compactedMessageCount: 3,
+        keptMessageCount: 2,
+      },
+      runStartedEvent("run_3", 2, "third"),
+    ];
+
+    expect(deriveContextUsage(events, { maxMessagesBeforeCompact: 8, keepRecentMessages: 2 })).toEqual({
+      compactedCount: 1,
+      keepRecentMessages: 2,
+      maxMessagesBeforeCompact: 8,
+      messageCount: 4,
+      percent: 50,
+      status: "normal",
+      summaryActive: true,
+    });
+  });
+
   test("aggregates token usage across loaded events", () => {
     expect(
       aggregateTokenStats([
@@ -135,6 +187,31 @@ function tokenUsageEvent(id: string, promptTokens: number, completionTokens: num
     promptTokens,
     completionTokens,
     totalTokens,
+  };
+}
+
+function runStartedEvent(runId: string, sequence: number, input: string): PanelTraceEvent {
+  return {
+    id: `${runId}_started`,
+    runId,
+    sequence,
+    timestamp: "2026-05-18T01:02:03.000Z",
+    type: "run_started",
+    input,
+  };
+}
+
+function assistantMessageEvent(runId: string, sequence: number): PanelTraceEvent {
+  return {
+    id: `${runId}_assistant`,
+    runId,
+    sequence,
+    timestamp: "2026-05-18T01:02:03.000Z",
+    type: "assistant_message",
+    message: {
+      role: "assistant",
+      content: [{ type: "text", text: "answer" }],
+    },
   };
 }
 

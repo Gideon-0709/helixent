@@ -88,6 +88,15 @@ export interface TokenUsageEvent extends TraceEventBase {
   totalTokens: number;
 }
 
+export interface ContextCompactedEvent extends TraceEventBase {
+  type: "context_compacted";
+  previousMessageCount: number;
+  currentMessageCount: number;
+  compactedMessageCount: number;
+  keptMessageCount: number;
+  summaryPreview?: string;
+}
+
 export interface AssistantMessageEvent extends TraceEventBase {
   type: "assistant_message";
   step: number;
@@ -222,6 +231,7 @@ export type TraceEvent =
   | ModelStartedEvent
   | ModelCompletedEvent
   | TokenUsageEvent
+  | ContextCompactedEvent
   | AssistantMessageEvent
   | ToolResultMessageEvent
   | FinalAnswerEvent

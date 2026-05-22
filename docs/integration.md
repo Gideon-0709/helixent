@@ -7,7 +7,7 @@ Helixent exposes two entry points:
 - Web debug panel: for humans, protected by username/password login.
 - Main system API: for service-to-service calls, protected by bearer API keys.
 
-API details are documented in [`api-contract.md`](./api-contract.md).
+API details are documented in [`contract.md`](./contract.md).
 
 ## Main System API
 

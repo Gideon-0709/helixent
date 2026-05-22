@@ -39,6 +39,23 @@ export interface TokenStats {
   total: number;
 }
 
+export type ContextUsageStatus = "normal" | "warning" | "danger";
+
+export interface ContextPolicy {
+  keepRecentMessages: number;
+  maxMessagesBeforeCompact: number;
+}
+
+export interface ContextUsage {
+  compactedCount: number;
+  keepRecentMessages: number;
+  maxMessagesBeforeCompact: number;
+  messageCount: number;
+  percent: number;
+  status: ContextUsageStatus;
+  summaryActive: boolean;
+}
+
 export interface PanelSessionSummary {
   id: string;
   title: string;
@@ -183,6 +200,15 @@ export function toKeyEvent(event: PanelTraceEvent): KeyEvent | null {
   if (event.type === "token_usage") {
     return { kind: "meta", title: "Token Usage", text: `${numberValue(event.totalTokens)} total tokens`, time, raw: event };
   }
+  if (event.type === "context_compacted") {
+    return {
+      kind: "meta",
+      title: "Context Compacted",
+      text: `${numberValue(event.compactedMessageCount)} older messages summarized, ${numberValue(event.keptMessageCount)} recent messages kept`,
+      time,
+      raw: event,
+    };
+  }
   return null;
 }
 
@@ -208,6 +234,32 @@ export function subtractTokenStats(stats: TokenStats, baseline: TokenStats): Tok
     prompt: Math.max(0, stats.prompt - baseline.prompt),
     completion: Math.max(0, stats.completion - baseline.completion),
     total: Math.max(0, stats.total - baseline.total),
+  };
+}
+
+export function deriveContextUsage(events: PanelTraceEvent[], policy: ContextPolicy): ContextUsage {
+  const maxMessagesBeforeCompact = Math.max(1, policy.maxMessagesBeforeCompact);
+  let messageCount = 0;
+  let compactedCount = 0;
+  for (const event of events) {
+    if (event.type === "context_compacted") {
+      messageCount = numberValue(event.currentMessageCount);
+      compactedCount += 1;
+      continue;
+    }
+    if (event.type === "run_started" || event.type === "assistant_message" || event.type === "tool_result_message") {
+      messageCount += 1;
+    }
+  }
+  const percent = Math.min(100, Math.round((messageCount / maxMessagesBeforeCompact) * 100));
+  return {
+    compactedCount,
+    keepRecentMessages: Math.max(1, policy.keepRecentMessages),
+    maxMessagesBeforeCompact,
+    messageCount,
+    percent,
+    status: percent >= 90 ? "danger" : percent >= 70 ? "warning" : "normal",
+    summaryActive: compactedCount > 0,
   };
 }
 
